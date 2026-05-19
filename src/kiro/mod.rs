@@ -1,6 +1,7 @@
 //! Kiro API 客户端模块
 
 pub mod affinity;
+pub mod background_refresh;
 pub mod cooldown;
 pub mod endpoint;
 pub mod fingerprint;
