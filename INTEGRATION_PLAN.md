@@ -377,3 +377,5 @@ git checkout work/integrate-feature
 | 2026-05-19 | 6.1 | 移植 6 个诊断脚本到 `tools/`：analyze_compression、diagnose_improper_request、replay_demo_request、test_400_improperly_formed、test_empty_content、test_prompt_cache_usage。零 Rust 代码改动 |
 | 2026-05-19 | 6.3 | 移植 `src/kiro/web_portal.rs`（554 行，Kiro Web Portal API 查询账户/订阅/用量）；`kiro/mod.rs` 加 `pub mod web_portal;`；Cargo.toml 新增 `serde_cbor 0.11`（rpc-v2-cbor 协议）。feature 自身也是 dead-code（文件级 allow），预留 future Admin UI 集成 |
 | 2026-05-19 | 6.2 | Cargo.toml 加 `sensitive-logs = []` feature；main.rs 主凭证日志 / handlers.rs 两处 Kiro request body 日志加 `#[cfg(feature = "sensitive-logs")]` 守卫，默认输出摘要字段，启用后输出完整内容。两种 feature 配置都通过编译与测试 |
+| 2026-05-19 | fix | main.rs:224 启动日志（info 级别打印 API Key 前 50%）补 sensitive-logs 守卫——默认仅输出长度，启用后保留原行为 |
+| 2026-05-19 | 5.1 | `AppState.compression_config` 从 `Arc<C>` 升级为 `Arc<RwLock<C>>`；handlers reader 改 `read().clone()` 拿快照；新增 `with_compression_config_shared()` 接受外部 RwLock（阶段 5.2 用） |

@@ -82,11 +82,12 @@ pub struct AppState {
     pub kiro_provider: Option<Arc<KiroProvider>>,
     /// 是否开启非流式响应的 thinking 块提取
     pub extract_thinking: bool,
-    /// 输入压缩与图片处理配置（阶段 3.2 接入）
+    /// 输入压缩与图片处理配置（阶段 3.2 接入，阶段 5.1 升级为 RwLock）
     ///
-    /// 当前为不可变 `Arc<CompressionConfig>`；阶段 5 引入热加载时
-    /// 将升级为 `Arc<RwLock<CompressionConfig>>`。
-    pub compression_config: Arc<CompressionConfig>,
+    /// `Arc<RwLock<CompressionConfig>>` 支持运行时热更新：阶段 5.2 的
+    /// admin PATCH 端点写入该锁后，下次请求即生效。读侧需 `.read().clone()`
+    /// 拿快照后再传给 converter（避免 RwLockReadGuard 跨越 .await 边界）。
+    pub compression_config: Arc<RwLock<CompressionConfig>>,
     /// Prompt Cache 运行时（阶段 3.3 引入）
     ///
     /// 持有 `Arc<RwLock<PromptCacheRuntime>>` 以预留阶段 5 热加载能力。
@@ -101,7 +102,7 @@ impl AppState {
             api_key: api_key.into(),
             kiro_provider: None,
             extract_thinking,
-            compression_config: Arc::new(CompressionConfig::default()),
+            compression_config: Arc::new(RwLock::new(CompressionConfig::default())),
             // 默认 TTL 300s（5m），accounting 启用——与 Anthropic ephemeral 默认值对齐
             prompt_cache_runtime: Arc::new(RwLock::new(PromptCacheRuntime::new(300, true))),
         }
@@ -113,9 +114,20 @@ impl AppState {
         self
     }
 
-    /// 设置压缩与图片处理配置
+    /// 设置压缩与图片处理配置（owned 版本，内部包成 RwLock）
     pub fn with_compression_config(mut self, config: CompressionConfig) -> Self {
-        self.compression_config = Arc::new(config);
+        self.compression_config = Arc::new(RwLock::new(config));
+        self
+    }
+
+    /// 设置压缩与图片处理配置（接收外部共享的 RwLock，便于 admin 与
+    /// anthropic 路由共用同一份热更新源）
+    #[allow(dead_code)] // 阶段 5.2 admin handlers 接入时使用
+    pub fn with_compression_config_shared(
+        mut self,
+        config: Arc<RwLock<CompressionConfig>>,
+    ) -> Self {
+        self.compression_config = config;
         self
     }
 

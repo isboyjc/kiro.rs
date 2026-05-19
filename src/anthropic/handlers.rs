@@ -239,7 +239,10 @@ pub async fn post_messages(
     }
 
     // 转换请求
-    let conversion_result = match convert_request(&payload, state.compression_config.as_ref()) {
+    // 阶段 5.1：read().clone() 拿快照后再借用，避免 RwLockReadGuard 跨越
+    // 后续的 .await 边界（converter 本身是同步的，但保守起见）
+    let compression_snapshot = state.compression_config.read().clone();
+    let conversion_result = match convert_request(&payload, &compression_snapshot) {
         Ok(result) => result,
         Err(e) => {
             let (error_type, message) = match &e {
@@ -758,7 +761,10 @@ pub async fn post_messages_cc(
     }
 
     // 转换请求
-    let conversion_result = match convert_request(&payload, state.compression_config.as_ref()) {
+    // 阶段 5.1：read().clone() 拿快照后再借用，避免 RwLockReadGuard 跨越
+    // 后续的 .await 边界（converter 本身是同步的，但保守起见）
+    let compression_snapshot = state.compression_config.read().clone();
+    let conversion_result = match convert_request(&payload, &compression_snapshot) {
         Ok(result) => result,
         Err(e) => {
             let (error_type, message) = match &e {
