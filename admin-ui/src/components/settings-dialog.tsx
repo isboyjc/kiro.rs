@@ -179,43 +179,53 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className="max-w-4xl">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <FileJson className="h-5 w-5" />
+          <DialogHeader className="pb-2">
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <div className="h-7 w-7 rounded-md bg-primary/10 flex items-center justify-center">
+                <FileJson className="h-4 w-4 text-primary" />
+              </div>
               系统配置
             </DialogTitle>
-            <DialogDescription>
-              修改 config.json。
-              <Badge variant="secondary" className="ml-2">🟢 热生效</Badge>
-              <span className="text-xs ml-1">立即应用</span>
-              <Badge variant="outline" className="ml-2">⚠ 需重启</Badge>
-              <span className="text-xs ml-1">写盘但下次启动生效</span>
+            <DialogDescription className="text-xs flex items-center gap-2 flex-wrap mt-1">
+              <span>修改后生效方式</span>
+              <span className="inline-flex items-center gap-1">
+                <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
+                <span>热生效（立即应用）</span>
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                <span>需重启（写盘但下次启动生效）</span>
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
+                <span>敏感字段</span>
+              </span>
             </DialogDescription>
           </DialogHeader>
 
           {/* Tab 切换 */}
-          <div className="flex border-b">
+          <div className="flex items-center gap-0.5 p-1 rounded-md bg-muted/40 w-fit">
             <button
-              className={`px-3 py-2 text-sm border-b-2 ${
+              className={`px-3 py-1.5 text-xs rounded transition ${
                 tab === 'form'
-                  ? 'border-primary text-primary font-medium'
-                  : 'border-transparent text-muted-foreground hover:text-foreground'
+                  ? 'bg-background shadow-sm text-foreground font-medium'
+                  : 'text-muted-foreground hover:text-foreground'
               }`}
               onClick={() => setTab('form')}
             >
               可视化表单
             </button>
             <button
-              className={`px-3 py-2 text-sm border-b-2 ${
+              className={`px-3 py-1.5 text-xs rounded transition flex items-center gap-1 ${
                 tab === 'raw'
-                  ? 'border-primary text-primary font-medium'
-                  : 'border-transparent text-muted-foreground hover:text-foreground'
+                  ? 'bg-background shadow-sm text-foreground font-medium'
+                  : 'text-muted-foreground hover:text-foreground'
               }`}
               onClick={() => setTab('raw')}
             >
               Raw JSON
               {parseError && (
-                <span className="text-red-500 ml-1" title={parseError}>●</span>
+                <span className="h-1.5 w-1.5 rounded-full bg-red-500" title={parseError} />
               )}
             </button>
           </div>

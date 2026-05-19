@@ -50,7 +50,7 @@ function setByPath(obj: ConfigJson, path: string, value: unknown): ConfigJson {
 
 export function ConfigForm({ schema, value, onChange }: ConfigFormProps) {
   return (
-    <div className="space-y-4 max-h-[480px] overflow-y-auto pr-2">
+    <div className="space-y-3 max-h-[500px] overflow-y-auto pr-1 -mr-1">
       {schema.groups.map((group) => (
         <GroupCard key={group.id} group={group} value={value} onChange={onChange} />
       ))}
@@ -68,27 +68,20 @@ function GroupCard({
   onChange: (next: ConfigJson) => void
 }) {
   return (
-    <div className="border rounded-md">
-      <div className="flex items-center justify-between px-3 py-2 border-b bg-muted/40">
-        <div>
-          <div className="font-medium text-sm flex items-center gap-2">
-            {group.label}
-            {group.needsRestart && (
-              <Badge variant="outline" className="text-amber-600 text-xs">⚠ 需重启</Badge>
-            )}
-            {group.sensitive && (
-              <Badge variant="destructive" className="text-xs">🔒 敏感</Badge>
-            )}
-            {!group.needsRestart && !group.sensitive && (
-              <Badge variant="secondary" className="text-xs">🟢 热生效</Badge>
+    <div className="rounded-lg border bg-card overflow-hidden">
+      <div className="flex items-center justify-between px-3 py-2 bg-muted/30">
+        <div className="flex items-center gap-2 min-w-0">
+          <GroupDot needsRestart={group.needsRestart} sensitive={group.sensitive} />
+          <div className="min-w-0">
+            <div className="font-medium text-sm">{group.label}</div>
+            {group.description && (
+              <div className="text-[11px] text-muted-foreground mt-0.5 truncate">{group.description}</div>
             )}
           </div>
-          {group.description && (
-            <div className="text-xs text-muted-foreground mt-0.5">{group.description}</div>
-          )}
         </div>
+        <GroupBadge needsRestart={group.needsRestart} sensitive={group.sensitive} />
       </div>
-      <div className="p-3 space-y-3">
+      <div className="p-3 space-y-2.5">
         {group.fields.map((f) => (
           <FieldRow
             key={f.key}
@@ -100,6 +93,21 @@ function GroupCard({
       </div>
     </div>
   )
+}
+
+function GroupDot({ needsRestart, sensitive }: { needsRestart: boolean; sensitive: boolean }) {
+  const color = sensitive ? 'bg-red-500' : needsRestart ? 'bg-amber-500' : 'bg-green-500'
+  return <span className={`h-2 w-2 rounded-full ${color} shrink-0`} />
+}
+
+function GroupBadge({ needsRestart, sensitive }: { needsRestart: boolean; sensitive: boolean }) {
+  if (sensitive) {
+    return <Badge variant="destructive" className="h-4 px-1.5 text-[10px]">敏感</Badge>
+  }
+  if (needsRestart) {
+    return <Badge variant="outline" className="h-4 px-1.5 text-[10px] text-amber-600 border-amber-300">需重启</Badge>
+  }
+  return <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">热生效</Badge>
 }
 
 function FieldRow({
@@ -114,48 +122,56 @@ function FieldRow({
   const [showSensitive, setShowSensitive] = useState(false)
 
   return (
-    <div className="grid grid-cols-12 gap-2 items-start">
+    <div className="grid grid-cols-12 gap-3 items-center">
       {/* 标签列 */}
-      <div className="col-span-4">
-        <div className="text-sm font-medium flex items-center gap-1">
+      <div className="col-span-4 min-w-0">
+        <div className="text-xs font-medium flex items-center gap-1 truncate">
           {field.label}
-          {field.needsRestart && (
-            <span className="text-amber-600 text-xs" title="需重启">⚠</span>
+          {field.needsRestart && !field.sensitive && (
+            <span className="h-1.5 w-1.5 rounded-full bg-amber-500" title="需重启生效" />
           )}
           {field.sensitive && (
-            <span className="text-red-600 text-xs" title="敏感字段">🔒</span>
+            <span className="h-1.5 w-1.5 rounded-full bg-red-500" title="敏感字段" />
           )}
         </div>
-        <div className="font-mono text-[10px] text-muted-foreground">{field.key}</div>
+        <div className="font-mono text-[10px] text-muted-foreground/80 truncate" title={field.key}>{field.key}</div>
       </div>
 
       {/* 输入列 */}
       <div className="col-span-8 space-y-1">
-        <FieldInput
-          field={field}
-          value={value}
-          onChange={onChange}
-          revealed={showSensitive}
-        />
-        {field.sensitive && field.type === 'string' && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-6 px-1 text-xs"
-            onClick={() => setShowSensitive((v) => !v)}
-          >
-            {showSensitive ? <EyeOff className="h-3 w-3 mr-0.5" /> : <Eye className="h-3 w-3 mr-0.5" />}
-            {showSensitive ? '隐藏' : '显示'}
-          </Button>
-        )}
-        {field.description && (
-          <div className="text-xs text-muted-foreground">{field.description}</div>
-        )}
-        {field.warning && (
-          <div className="text-xs flex items-start gap-1 text-amber-600">
-            <AlertCircle className="h-3 w-3 mt-0.5 shrink-0" />
-            {field.warning}
+        <div className="flex items-start gap-1">
+          <div className="flex-1">
+            <FieldInput
+              field={field}
+              value={value}
+              onChange={onChange}
+              revealed={showSensitive}
+            />
+          </div>
+          {field.sensitive && field.type === 'string' && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-9 w-9 shrink-0"
+              onClick={() => setShowSensitive((v) => !v)}
+              title={showSensitive ? '隐藏' : '显示'}
+            >
+              {showSensitive ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+            </Button>
+          )}
+        </div>
+        {(field.description || field.warning) && (
+          <div className="space-y-0.5">
+            {field.description && (
+              <div className="text-[11px] text-muted-foreground leading-tight">{field.description}</div>
+            )}
+            {field.warning && (
+              <div className="text-[11px] flex items-start gap-1 text-amber-600 leading-tight">
+                <AlertCircle className="h-3 w-3 mt-0.5 shrink-0" />
+                <span>{field.warning}</span>
+              </div>
+            )}
           </div>
         )}
       </div>
