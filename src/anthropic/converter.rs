@@ -610,8 +610,33 @@ fn remove_orphaned_tool_uses(
 /// Kiro API 工具名称最大长度限制
 const TOOL_NAME_MAX_LEN: usize = 63;
 
-/// 生成确定性短名称：截断前缀 + "_" + 8 位 SHA256 hex
-fn shorten_tool_name(name: &str) -> String {
+/// 阶段 7.11：MCP 工具名命名空间压缩
+///
+/// 尝试把 `mcp__<server>__<tool>` 压缩为 `mcp__<tool>`（参考 Kiro-Go 实现）。
+/// 仅当：
+/// - 以 `mcp__` 开头
+/// - 内部至少还有一个 `__` 分隔符（即包含 server 段）
+/// - 压缩后比原始更短且 ≤ TOOL_NAME_MAX_LEN
+///
+/// 返回 `Some(compressed)` 表示成功；`None` 表示无法用此策略压缩（调用方应回退到 hash）。
+fn compress_mcp_namespace(name: &str) -> Option<String> {
+    let rest = name.strip_prefix("mcp__")?;
+    // 找到 server 段后面的第一个 __，剥掉 server 段
+    let server_end = rest.find("__")?;
+    let tail = &rest[server_end + 2..];
+    if tail.is_empty() {
+        return None;
+    }
+    let compressed = format!("mcp__{}", tail);
+    if compressed.len() < name.len() && compressed.len() <= TOOL_NAME_MAX_LEN {
+        Some(compressed)
+    } else {
+        None
+    }
+}
+
+/// 哈希截断：生成确定性短名称——截断前缀 + "_" + 8 位 SHA256 hex
+fn hash_truncate_tool_name(name: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(name.as_bytes());
     let hash_hex = format!("{:x}", hasher.finalize());
@@ -625,12 +650,43 @@ fn shorten_tool_name(name: &str) -> String {
     format!("{}_{}", prefix, hash_suffix)
 }
 
+/// 生成短名称：MCP 命名空间压缩优先，回退到哈希截断
+///
+/// 优先策略对人类更友好——`mcp__filesystem__list_directory_with_glob` →
+/// `mcp__list_directory_with_glob`（保留语义）而非 `mcp__filesystem__list_directory_a1b2c3d4`。
+fn shorten_tool_name(name: &str) -> String {
+    if let Some(compressed) = compress_mcp_namespace(name) {
+        return compressed;
+    }
+    hash_truncate_tool_name(name)
+}
+
 /// 如果名称超长则缩短，并记录映射（short → original）
+///
+/// **冲突处理**：若 MCP 命名空间压缩生成的 short 在 map 中已存在但指向**不同** original
+/// （如 `mcp__fs__read_file` 与 `mcp__github__read_file` 都被压缩为 `mcp__read_file`），
+/// 自动回退到哈希截断保证 short 唯一。
 fn map_tool_name(name: &str, tool_name_map: &mut HashMap<String, String>) -> String {
     if name.len() <= TOOL_NAME_MAX_LEN {
+        // 即使没超长，也要确保不与已映射的 short 冲突
+        if tool_name_map.contains_key(name)
+            && tool_name_map.get(name).map(|s| s.as_str()) != Some(name)
+        {
+            let hashed = hash_truncate_tool_name(name);
+            tool_name_map.insert(hashed.clone(), name.to_string());
+            return hashed;
+        }
         return name.to_string();
     }
     let short = shorten_tool_name(name);
+    // 冲突检测：相同 short 已映射到不同 original → 用哈希版本
+    if let Some(existing) = tool_name_map.get(&short) {
+        if existing != name {
+            let hashed = hash_truncate_tool_name(name);
+            tool_name_map.insert(hashed.clone(), name.to_string());
+            return hashed;
+        }
+    }
     tool_name_map.insert(short.clone(), name.to_string());
     short
 }
@@ -1116,6 +1172,104 @@ mod tests {
         let result = map_tool_name(long_name, &mut map);
         assert!(result.len() <= TOOL_NAME_MAX_LEN);
         assert_eq!(map.get(&result), Some(&long_name.to_string()));
+    }
+
+    // 阶段 7.11：MCP 命名空间压缩测试
+    #[test]
+    fn test_compress_mcp_namespace_basic() {
+        // 标准 MCP 名应能剥掉 server 段
+        let name = "mcp__filesystem__list_directory_with_recursive_glob_pattern_options";
+        assert!(name.len() > TOOL_NAME_MAX_LEN);
+        let compressed = compress_mcp_namespace(name).unwrap();
+        assert_eq!(compressed, "mcp__list_directory_with_recursive_glob_pattern_options");
+        assert!(compressed.len() <= TOOL_NAME_MAX_LEN);
+    }
+
+    #[test]
+    fn test_compress_mcp_namespace_non_mcp_returns_none() {
+        // 非 mcp__ 前缀不应被压缩
+        assert!(compress_mcp_namespace("some_very_long_function_name_without_mcp_prefix_that_overflows_limit").is_none());
+        assert!(compress_mcp_namespace("Write").is_none());
+    }
+
+    #[test]
+    fn test_compress_mcp_namespace_no_server_segment_returns_none() {
+        // mcp__ 前缀但没有 server 段（无第二个 __）
+        assert!(compress_mcp_namespace("mcp__tool").is_none());
+    }
+
+    #[test]
+    fn test_compress_mcp_namespace_compressed_still_too_long() {
+        // 压缩后仍然超长 → 返回 None，调用方应回退到 hash 截断
+        let name = format!("mcp__server__{}", "a".repeat(100));
+        assert!(compress_mcp_namespace(&name).is_none());
+    }
+
+    #[test]
+    fn test_shorten_prefers_mcp_compression_over_hash() {
+        // MCP 风格 → 走命名空间压缩，结果是人类可读的
+        let name = "mcp__filesystem__list_directory_with_recursive_glob_pattern_options";
+        let short = shorten_tool_name(name);
+        assert_eq!(short, "mcp__list_directory_with_recursive_glob_pattern_options");
+        // 不应包含 hash 后缀（8 位 hex）
+        assert!(!short.contains("_a") || short.ends_with("options"));
+    }
+
+    #[test]
+    fn test_shorten_falls_back_to_hash_for_non_mcp() {
+        // 非 MCP 风格仍走 hash 截断
+        let name = "some_very_long_function_name_without_mcp_prefix_that_overflows_the_limit";
+        assert!(name.len() > TOOL_NAME_MAX_LEN);
+        let short = shorten_tool_name(name);
+        assert!(short.len() <= TOOL_NAME_MAX_LEN);
+        // hash 截断的标志：以 _xxxxxxxx (8 位 hex) 结尾
+        let hash_suffix = &short[short.len() - 8..];
+        assert!(hash_suffix.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_map_tool_name_mcp_collision_falls_back_to_hash() {
+        // 模拟两个不同 server 但 tool 同名的情况：
+        // mcp__fs__read_file_with_very_long_options
+        // mcp__github__read_file_with_very_long_options
+        // 命名空间压缩都会变成 mcp__read_file_with_very_long_options
+        // 第二个必须自动回退到 hash 截断保证唯一
+        let mut map = HashMap::new();
+        let name_a = format!("mcp__fs__{}", "x".repeat(70));      // > 63
+        let name_b = format!("mcp__github__{}", "x".repeat(70));  // > 63，压缩后会与 a 冲突
+
+        let short_a = map_tool_name(&name_a, &mut map);
+        let short_b = map_tool_name(&name_b, &mut map);
+
+        assert_ne!(short_a, short_b, "冲突时第二个必须用不同的 short");
+        assert_eq!(map.get(&short_a), Some(&name_a));
+        assert_eq!(map.get(&short_b), Some(&name_b));
+    }
+
+    #[test]
+    fn test_round_trip_via_tool_name_map() {
+        // 完整往返：long name → compressed short → 反向查回 long name
+        let mut map = HashMap::new();
+        let originals = [
+            "mcp__filesystem__list_directory_with_recursive_glob_pattern_opts",
+            "mcp__github__create_pull_request_with_review_assignees_and_labels",
+            "Write",  // 短名应原样透传
+            "non_mcp_extremely_long_function_name_that_overflows_the_kiro_limit_safely",
+        ];
+        let shorts: Vec<String> = originals
+            .iter()
+            .map(|o| map_tool_name(o, &mut map))
+            .collect();
+
+        for (orig, short) in originals.iter().zip(shorts.iter()) {
+            if orig.len() <= TOOL_NAME_MAX_LEN {
+                assert_eq!(short, orig, "短名应原样透传");
+            } else {
+                assert!(short.len() <= TOOL_NAME_MAX_LEN);
+                // 反向查询应能拿回原名
+                assert_eq!(map.get(short), Some(&orig.to_string()));
+            }
+        }
     }
 
     #[test]
