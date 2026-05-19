@@ -29,6 +29,39 @@ export interface CredentialStatusItem {
   endpoint: string
 }
 
+// === 阶段 7：Config 面板 ===
+// 完整 Config 结构（与后端 src/model/config.rs 的 Config 对齐，camelCase）
+// 为了允许前端自由编辑（含未来扩展字段），用 Record<string, unknown> 而非强类型
+export type ConfigJson = Record<string, unknown>
+
+export interface ConfigRawResponse {
+  content: string
+  path: string
+}
+
+export interface ConfigFieldError {
+  path: string
+  message: string
+}
+
+export interface ConfigValidateResponse {
+  valid: boolean
+  errors: ConfigFieldError[]
+  needsRestart: string[]
+  hotReload: string[]
+}
+
+export interface ConfigUpdateResponse {
+  ok: boolean
+  message: string
+  needsRestart: string[]
+  hotReload: string[]
+  /** adminApiKey 被修改时返回新值，前端用于自动重连 */
+  newAdminApiKey?: string
+  /** apiKey 被修改时返回新值，便于前端展示提示客户端 */
+  newApiKey?: string
+}
+
 // 缓存余额条目（来自 GET /credentials/balances/cached，纯磁盘缓存快照）
 export interface CachedBalanceInfo {
   id: number
