@@ -380,3 +380,4 @@ git checkout work/integrate-feature
 | 2026-05-19 | fix | main.rs:224 启动日志（info 级别打印 API Key 前 50%）补 sensitive-logs 守卫——默认仅输出长度，启用后保留原行为 |
 | 2026-05-19 | 5.1 | `AppState.compression_config` 从 `Arc<C>` 升级为 `Arc<RwLock<C>>`；handlers reader 改 `read().clone()` 拿快照；新增 `with_compression_config_shared()` 接受外部 RwLock（阶段 5.2 用） |
 | 2026-05-19 | 5.2 | Admin 后端热加载端点：`GET/PUT /api/admin/config/compression`、`GET/PUT /api/admin/config/prompt-cache`；AdminService 持有同一份 `Arc<RwLock<>>` 与 anthropic AppState 共享；PromptCacheRuntime 暴露 ttl_seconds/accounting_enabled getter。前端 UI 留待阶段 5.3 |
+| 2026-05-19 | 4.1 | 移植 4 个无依赖凭据栈模块到 `src/kiro/`：rate_limiter (484) / cooldown (388) / affinity (86) / fingerprint (301)。3 个文件已自带 `#![allow(dead_code)]`，affinity 补加；caller 阶段 4.3+ 接入。测试 +23 |
