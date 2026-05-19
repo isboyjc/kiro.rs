@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::image::process_image;
 use crate::kiro::model::requests::conversation::{
     AssistantMessage, ConversationState, CurrentMessage, HistoryAssistantMessage,
     HistoryUserMessage, KiroImage, Message, UserInputMessage, UserInputMessageContext, UserMessage,
@@ -14,6 +15,7 @@ use crate::kiro::model::requests::conversation::{
 use crate::kiro::model::requests::tool::{
     InputSchema, Tool, ToolResult, ToolSpecification, ToolUseEntry,
 };
+use crate::model::config::CompressionConfig;
 
 use super::types::{ContentBlock, MessagesRequest};
 
@@ -363,7 +365,36 @@ fn process_message_content(
                         "image" => {
                             if let Some(source) = block.source {
                                 if let Some(format) = get_image_format(&source.media_type) {
-                                    images.push(KiroImage::from_base64(format, source.data));
+                                    // 阶段 3.1：用 CompressionConfig::default() 进行单图缩放。
+                                    // image_count=0 → 走单图像素限制路径（足以覆盖绝大多数实际场景）。
+                                    // 多图模式与配置传递路径待阶段 3.2 与压缩管道一并接入。
+                                    let cfg = CompressionConfig::default();
+                                    if cfg.enabled {
+                                        match process_image(&source.data, &format, &cfg, 0) {
+                                            Ok(result) => {
+                                                if result.was_resized || result.was_reencoded {
+                                                    tracing::info!(
+                                                        format = %format,
+                                                        original_size = ?result.original_size,
+                                                        final_size = ?result.final_size,
+                                                        tokens = result.tokens,
+                                                        "图片已处理"
+                                                    );
+                                                }
+                                                images.push(KiroImage::from_base64(format, result.data));
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    format = %format,
+                                                    error = %e,
+                                                    "图片处理失败，使用原始数据"
+                                                );
+                                                images.push(KiroImage::from_base64(format, source.data));
+                                            }
+                                        }
+                                    } else {
+                                        images.push(KiroImage::from_base64(format, source.data));
+                                    }
                                 }
                             }
                         }

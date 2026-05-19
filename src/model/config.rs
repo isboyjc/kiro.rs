@@ -109,6 +109,13 @@ pub struct Config {
     #[serde(default)]
     pub endpoints: HashMap<String, serde_json::Value>,
 
+    /// 输入压缩与图片处理配置（阶段 3 起逐步接入）
+    ///
+    /// 字段 schema 一次性加好；当前阶段 3.1 只有图片处理生效，
+    /// 压缩相关字段在阶段 3.2 接入压缩管道时启用。
+    #[serde(default)]
+    pub compression: CompressionConfig,
+
     /// 配置文件路径（运行时元数据，不写入 JSON）
     #[serde(skip)]
     config_path: Option<PathBuf>,
@@ -184,9 +191,142 @@ impl Default for Config {
             extract_thinking: default_extract_thinking(),
             default_endpoint: default_endpoint(),
             endpoints: HashMap::new(),
+            compression: CompressionConfig::default(),
             config_path: None,
         }
     }
+}
+
+/// 输入压缩与图片处理配置（从 feature/master 移植）
+///
+/// 阶段 3.1 仅图片处理相关字段（`image_max_*`、`image_multi_threshold`）生效；
+/// 压缩相关字段为阶段 3.2 预留 schema，当前未接入 caller。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompressionConfig {
+    /// 总开关，默认 true。当前仅图片处理路径检查此开关
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 空白压缩（连续空行、行尾空格），默认 true。阶段 3.2 接入
+    #[serde(default = "default_true")]
+    pub whitespace_compression: bool,
+    /// thinking 块处理策略: "discard" | "truncate" | "keep"。阶段 3.2 接入
+    #[serde(default = "default_thinking_strategy")]
+    pub thinking_strategy: String,
+    /// tool_result 截断阈值（字符数），默认 8000。阶段 3.2 接入
+    #[serde(default = "default_8000")]
+    pub tool_result_max_chars: usize,
+    /// 智能截断保留头部行数，默认 80。阶段 3.2 接入
+    #[serde(default = "default_80")]
+    pub tool_result_head_lines: usize,
+    /// 智能截断保留尾部行数，默认 40。阶段 3.2 接入
+    #[serde(default = "default_40")]
+    pub tool_result_tail_lines: usize,
+    /// tool_use input 截断阈值（字符数），默认 6000。阶段 3.2 接入
+    #[serde(default = "default_6000")]
+    pub tool_use_input_max_chars: usize,
+    /// 工具描述截断阈值（字符数），覆盖原 10000 硬编码，默认 4000。阶段 3.2 接入
+    #[serde(default = "default_4000")]
+    pub tool_description_max_chars: usize,
+    /// 历史最大轮数，默认 80（0=不限）。阶段 3.2 接入
+    #[serde(default = "default_80_turns")]
+    pub max_history_turns: usize,
+    /// 历史最大字符数，默认 400000（0=不限）。阶段 3.2 接入
+    #[serde(default = "default_400k")]
+    pub max_history_chars: usize,
+    /// 图片长边最大像素，默认 4000（Anthropic 硬限制 8000，留安全余量）
+    #[serde(default = "default_image_max_long_edge")]
+    pub image_max_long_edge: u32,
+    /// 单张图片最大总像素，默认 4_000_000（2000×2000）
+    #[serde(default = "default_image_max_pixels_single")]
+    pub image_max_pixels_single: u32,
+    /// 多图模式下单张图片最大总像素，默认 4_000_000
+    #[serde(default = "default_image_max_pixels_multi")]
+    pub image_max_pixels_multi: u32,
+    /// 触发多图限制的图片数量阈值，默认 20
+    #[serde(default = "default_image_multi_threshold")]
+    pub image_multi_threshold: usize,
+    /// 请求体最大字节数，超过则直接拒绝（0 = 不限制）。阶段 3.2 接入
+    #[serde(default = "default_max_request_body_bytes")]
+    pub max_request_body_bytes: usize,
+}
+
+impl Default for CompressionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            whitespace_compression: true,
+            thinking_strategy: default_thinking_strategy(),
+            tool_result_max_chars: default_8000(),
+            tool_result_head_lines: default_80(),
+            tool_result_tail_lines: default_40(),
+            tool_use_input_max_chars: default_6000(),
+            tool_description_max_chars: default_4000(),
+            max_history_turns: default_80_turns(),
+            max_history_chars: default_400k(),
+            image_max_long_edge: default_image_max_long_edge(),
+            image_max_pixels_single: default_image_max_pixels_single(),
+            image_max_pixels_multi: default_image_max_pixels_multi(),
+            image_multi_threshold: default_image_multi_threshold(),
+            max_request_body_bytes: default_max_request_body_bytes(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_thinking_strategy() -> String {
+    "keep".to_string()
+}
+
+fn default_8000() -> usize {
+    8000
+}
+
+fn default_80() -> usize {
+    80
+}
+
+fn default_40() -> usize {
+    40
+}
+
+fn default_6000() -> usize {
+    6000
+}
+
+fn default_4000() -> usize {
+    4000
+}
+
+fn default_80_turns() -> usize {
+    80
+}
+
+fn default_400k() -> usize {
+    400_000
+}
+
+fn default_image_max_long_edge() -> u32 {
+    4000
+}
+
+fn default_image_max_pixels_single() -> u32 {
+    4_000_000
+}
+
+fn default_image_max_pixels_multi() -> u32 {
+    4_000_000
+}
+
+fn default_image_multi_threshold() -> usize {
+    20
+}
+
+fn default_max_request_body_bytes() -> usize {
+    0
 }
 
 impl Config {
