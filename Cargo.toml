@@ -38,3 +38,4 @@ rust-embed = "8"      # 嵌入静态文件
 mime_guess = "2"      # MIME 类型推断
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }  # 图片处理（缩放/GIF 抽帧/token 估算）
 base64 = "0.22"       # Base64 编解码（image.rs 用）
+serde_cbor = "0.11"   # CBOR 编解码（kiro/web_portal.rs 用 rpc-v2-cbor 协议查询账户）
