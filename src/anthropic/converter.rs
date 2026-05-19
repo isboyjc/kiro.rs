@@ -219,7 +219,10 @@ fn create_placeholder_tool(name: &str) -> Tool {
 }
 
 /// 将 Anthropic 请求转换为 Kiro 请求
-pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, ConversionError> {
+pub fn convert_request(
+    req: &MessagesRequest,
+    compression_config: &CompressionConfig,
+) -> Result<ConversionResult, ConversionError> {
     // 1. 映射模型
     let model_id = map_model(&req.model)
         .ok_or_else(|| ConversionError::UnsupportedModel(req.model.clone()))?;
@@ -258,11 +261,15 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
 
     // 5. 处理最后一条消息作为 current_message（经过 prefill 预处理，末尾必为 user）
     let last_message = messages.last().unwrap();
-    let (text_content, images, tool_results) = process_message_content(&last_message.content)?;
+    let (text_content, images, tool_results) =
+        process_message_content(&last_message.content, Some(compression_config))?;
 
     // 6. 转换工具定义（超长名称自动缩短并记录映射）
     let mut tool_name_map = HashMap::new();
     let mut tools = convert_tools(&req.tools, &mut tool_name_map);
+
+    // 阶段 3.2：工具定义超过 20KB 时触发两步压缩（schema 简化 + description 截断）
+    tools = super::tool_compression::compress_tools_if_needed(&tools);
 
     // 7. 构建历史消息（需要先构建，以便收集历史中使用的工具）
     let mut history = build_history(req, messages, &model_id, &mut tool_name_map)?;
@@ -315,7 +322,7 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
     let current_message = CurrentMessage::new(user_input);
 
     // 13. 构建 ConversationState
-    let conversation_state = ConversationState::new(conversation_id)
+    let mut conversation_state = ConversationState::new(conversation_id)
         .with_agent_continuation_id(agent_continuation_id)
         .with_agent_task_type("vibe")
         .with_chat_trigger_type(chat_trigger_type)
@@ -327,6 +334,23 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
             "工具名称映射: {} 个超长名称已缩短",
             tool_name_map.len()
         );
+    }
+
+    // 阶段 3.2：在协议转换完成后、发送上游前，执行多层输入压缩
+    if compression_config.enabled {
+        let stats = super::compressor::compress(&mut conversation_state, compression_config);
+        if stats.total_saved() > 0 || stats.history_turns_removed > 0 {
+            tracing::info!(
+                whitespace_saved = stats.whitespace_saved,
+                thinking_saved = stats.thinking_saved,
+                tool_result_saved = stats.tool_result_saved,
+                tool_use_input_saved = stats.tool_use_input_saved,
+                history_turns_removed = stats.history_turns_removed,
+                history_bytes_saved = stats.history_bytes_saved,
+                total_saved = stats.total_saved(),
+                "输入压缩完成"
+            );
+        }
     }
 
     Ok(ConversionResult {
@@ -342,8 +366,12 @@ fn determine_chat_trigger_type(_req: &MessagesRequest) -> String {
 }
 
 /// 处理消息内容，提取文本、图片和工具结果
+///
+/// `image_processing` 为 `Some(cfg)` 时按 cfg 进行图片缩放；`None` 等同上游透传
+/// （历史消息暂传 None，避免重复缩放上一轮已经过 Kiro 接受的图片）。
 fn process_message_content(
     content: &serde_json::Value,
+    image_processing: Option<&CompressionConfig>,
 ) -> Result<(String, Vec<KiroImage>, Vec<ToolResult>), ConversionError> {
     let mut text_parts = Vec::new();
     let mut images = Vec::new();
@@ -365,35 +393,37 @@ fn process_message_content(
                         "image" => {
                             if let Some(source) = block.source {
                                 if let Some(format) = get_image_format(&source.media_type) {
-                                    // 阶段 3.1：用 CompressionConfig::default() 进行单图缩放。
-                                    // image_count=0 → 走单图像素限制路径（足以覆盖绝大多数实际场景）。
-                                    // 多图模式与配置传递路径待阶段 3.2 与压缩管道一并接入。
-                                    let cfg = CompressionConfig::default();
-                                    if cfg.enabled {
-                                        match process_image(&source.data, &format, &cfg, 0) {
-                                            Ok(result) => {
-                                                if result.was_resized || result.was_reencoded {
-                                                    tracing::info!(
-                                                        format = %format,
-                                                        original_size = ?result.original_size,
-                                                        final_size = ?result.final_size,
-                                                        tokens = result.tokens,
-                                                        "图片已处理"
-                                                    );
+                                    // 阶段 3.2：图片处理只在 image_processing=Some 时启用
+                                    // （当前消息块走 Some，历史消息走 None 透传）。
+                                    // image_count=0 → 单图像素限制路径；多图模式扩展留待将来。
+                                    match image_processing {
+                                        Some(cfg) if cfg.enabled => {
+                                            match process_image(&source.data, &format, cfg, 0) {
+                                                Ok(result) => {
+                                                    if result.was_resized || result.was_reencoded {
+                                                        tracing::info!(
+                                                            format = %format,
+                                                            original_size = ?result.original_size,
+                                                            final_size = ?result.final_size,
+                                                            tokens = result.tokens,
+                                                            "图片已处理"
+                                                        );
+                                                    }
+                                                    images.push(KiroImage::from_base64(format, result.data));
                                                 }
-                                                images.push(KiroImage::from_base64(format, result.data));
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    format = %format,
-                                                    error = %e,
-                                                    "图片处理失败，使用原始数据"
-                                                );
-                                                images.push(KiroImage::from_base64(format, source.data));
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        format = %format,
+                                                        error = %e,
+                                                        "图片处理失败，使用原始数据"
+                                                    );
+                                                    images.push(KiroImage::from_base64(format, source.data));
+                                                }
                                             }
                                         }
-                                    } else {
-                                        images.push(KiroImage::from_base64(format, source.data));
+                                        _ => {
+                                            images.push(KiroImage::from_base64(format, source.data));
+                                        }
                                     }
                                 }
                             }
@@ -786,7 +816,7 @@ fn merge_user_messages(
     let mut all_tool_results = Vec::new();
 
     for msg in messages {
-        let (text, images, tool_results) = process_message_content(&msg.content)?;
+            let (text, images, tool_results) = process_message_content(&msg.content, None)?;
         if !text.is_empty() {
             content_parts.push(text);
         }
@@ -1123,7 +1153,7 @@ mod tests {
             metadata: None,
         };
 
-        let result = convert_request(&req).unwrap();
+        let result = convert_request(&req, &CompressionConfig::default()).unwrap();
 
         // 应该有映射
         assert_eq!(result.tool_name_map.len(), 1);
@@ -1186,7 +1216,7 @@ mod tests {
             metadata: None,
         };
 
-        let result = convert_request(&req).unwrap();
+        let result = convert_request(&req, &CompressionConfig::default()).unwrap();
         let short_name = result.tool_name_map.iter().next().unwrap().0.clone();
 
         // 历史中 assistant 消息的 tool_use name 也应该被映射
@@ -1243,7 +1273,7 @@ mod tests {
             metadata: None,
         };
 
-        let result = convert_request(&req).unwrap();
+        let result = convert_request(&req, &CompressionConfig::default()).unwrap();
 
         // 验证 tools 列表中包含了历史中使用的工具的占位符定义
         let tools = &result
@@ -1331,7 +1361,7 @@ mod tests {
             }),
         };
 
-        let result = convert_request(&req).unwrap();
+        let result = convert_request(&req, &CompressionConfig::default()).unwrap();
         assert_eq!(
             result.conversation_state.conversation_id,
             "a0662283-7fd3-4399-a7eb-52b9a717ae88"
@@ -1359,7 +1389,7 @@ mod tests {
             metadata: None,
         };
 
-        let result = convert_request(&req).unwrap();
+        let result = convert_request(&req, &CompressionConfig::default()).unwrap();
         // 验证生成的是有效的 UUID 格式
         assert_eq!(result.conversation_state.conversation_id.len(), 36);
         assert_eq!(
@@ -1789,7 +1819,7 @@ mod tests {
             metadata: None,
         };
 
-        let result = convert_request(&req);
+        let result = convert_request(&req, &CompressionConfig::default());
         assert!(result.is_ok(), "连续 assistant 消息场景不应报错: {:?}", result.err());
 
         let state = result.unwrap().conversation_state;

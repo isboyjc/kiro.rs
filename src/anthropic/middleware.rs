@@ -12,6 +12,7 @@ use axum::{
 
 use crate::common::auth;
 use crate::kiro::provider::KiroProvider;
+use crate::model::config::CompressionConfig;
 
 use super::types::ErrorResponse;
 
@@ -25,6 +26,11 @@ pub struct AppState {
     pub kiro_provider: Option<Arc<KiroProvider>>,
     /// 是否开启非流式响应的 thinking 块提取
     pub extract_thinking: bool,
+    /// 输入压缩与图片处理配置（阶段 3.2 接入）
+    ///
+    /// 当前为不可变 `Arc<CompressionConfig>`；阶段 5 引入热加载时
+    /// 将升级为 `Arc<RwLock<CompressionConfig>>`。
+    pub compression_config: Arc<CompressionConfig>,
 }
 
 impl AppState {
@@ -34,12 +40,19 @@ impl AppState {
             api_key: api_key.into(),
             kiro_provider: None,
             extract_thinking,
+            compression_config: Arc::new(CompressionConfig::default()),
         }
     }
 
     /// 设置 KiroProvider
     pub fn with_kiro_provider(mut self, provider: KiroProvider) -> Self {
         self.kiro_provider = Some(Arc::new(provider));
+        self
+    }
+
+    /// 设置压缩与图片处理配置
+    pub fn with_compression_config(mut self, config: CompressionConfig) -> Self {
+        self.compression_config = Arc::new(config);
         self
     }
 }

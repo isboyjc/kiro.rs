@@ -372,3 +372,4 @@ git checkout work/integrate-feature
 | 2026-05-19 | 1 | 移植 utf8 / redact / truncation / tool_compression |
 | 2026-05-19 | 2 | 移植 CLI endpoint；升级 trait 签名为 `Result<String>`；新增 `UsageRequestParts`；`ToolSpecification` 字段顺序对齐 kiro-cli 2.3.0 wire |
 | 2026-05-19 | 3.1 | 移植 `src/image.rs`；加 `CompressionConfig` 完整 schema（压缩字段为 3.2 预留）；converter.rs 当前消息图片块接入单图缩放；新增 `image` / `base64` 依赖 |
+| 2026-05-19 | 3.2 | 移植 `src/anthropic/compressor.rs`（四层压缩管道）；AppState 加 `Arc<CompressionConfig>`；`convert_request` 签名加 `&CompressionConfig` 并在末尾接入 `compressor::compress`；`convert_tools` 后接入 `tool_compression::compress_tools_if_needed`；3.1 的图片 hook 改为接收 config（用户配置真正生效） |
