@@ -255,6 +255,9 @@ impl KiroProvider {
                 if status.as_u16() == 429 {
                     self.token_manager
                         .set_credential_cooldown(ctx.id, CooldownReason::RateLimitExceeded);
+                    // 阶段 7.6：让 rate_limiter 累积指数退避 + 检测 suspend 关键词
+                    self.token_manager
+                        .report_rate_limiter_failure(ctx.id, Some(&body));
                 }
                 tracing::warn!(
                     "MCP 请求失败（上游瞬态错误，尝试 {}/{}）: {} {}",
@@ -469,6 +472,9 @@ impl KiroProvider {
                 if status.as_u16() == 429 {
                     self.token_manager
                         .set_credential_cooldown(ctx.id, CooldownReason::RateLimitExceeded);
+                    // 阶段 7.6：让 rate_limiter 累积指数退避 + 检测 suspend 关键词
+                    self.token_manager
+                        .report_rate_limiter_failure(ctx.id, Some(&body));
                 }
                 tracing::warn!(
                     "API 请求失败（上游瞬态错误，尝试 {}/{}）: {} {}",

@@ -930,6 +930,10 @@ impl AdminService {
         if new_config.extract_thinking != old_config.extract_thinking {
             *self.extract_thinking_shared.write() = new_config.extract_thinking;
         }
+        if new_config.credential_rpm != old_config.credential_rpm {
+            self.token_manager
+                .update_credential_rpm(new_config.credential_rpm);
+        }
 
         // 鉴权类热轮换（即使在 needs_restart 集合外，也立刻生效）
         let mut new_admin_api_key = None;
@@ -1034,6 +1038,7 @@ fn diff_config_fields(old: &Config, new: &Config) -> (Vec<String>, Vec<String>) 
     diff!(prompt_cache_accounting_enabled, "promptCacheAccountingEnabled", hot);
     diff!(load_balancing_mode, "loadBalancingMode", hot);
     diff!(extract_thinking, "extractThinking", hot);
+    diff!(credential_rpm, "credentialRpm", hot);
     // 鉴权类：通过 RwLock 热轮换
     diff!(api_key, "apiKey", hot);
     diff!(admin_api_key, "adminApiKey", hot);
@@ -1269,6 +1274,19 @@ fn build_config_schema() -> ConfigSchemaResponse {
                     ],
                     default_value: Some(json!("priority")),
                     ..field("loadBalancingMode", "负载均衡", "enum", false, "热生效")
+                },
+                ConfigSchemaField {
+                    nullable: true,
+                    min: Some(0.0),
+                    max: Some(600.0),
+                    placeholder: Some(s("留空 / 0 = 自适应 1-2 秒")),
+                    ..field(
+                        "credentialRpm",
+                        "凭据 RPM",
+                        "number",
+                        false,
+                        "单凭据每分钟请求数上限。留空/0 用默认自适应（1-2s 随机间隔）；>0 固定间隔 = 60000/rpm 毫秒。每日 500 上限 + 指数退避 + suspend 检测不受影响",
+                    )
                 },
                 ConfigSchemaField {
                     default_value: Some(json!(true)),

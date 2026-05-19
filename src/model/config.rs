@@ -91,6 +91,19 @@ pub struct Config {
     #[serde(default = "default_load_balancing_mode")]
     pub load_balancing_mode: String,
 
+    /// 单凭据每分钟请求数上限（RPM）—— 阶段 7.6 引入
+    ///
+    /// 用于凭据级节流：限制单凭据请求频率，主动分流到其他可用凭据，
+    /// 降低上游 429 概率。
+    ///
+    /// - `None` 或 `0`：使用内置自适应策略（默认 1-2 秒随机间隔 + 30% 抖动）
+    /// - `>0`：固定请求间隔 = `60_000 / rpm` 毫秒（关闭抖动）
+    ///
+    /// 其他保护参数（每日 500 上限 / 指数退避 / suspend 关键词识别）独立工作，
+    /// 不受此字段影响。
+    #[serde(default)]
+    pub credential_rpm: Option<u32>,
+
     /// 是否开启非流式响应的 thinking 块提取（默认 true）
     ///
     /// 启用后，非流式响应中的 `<thinking>...</thinking>` 标签会被解析为
@@ -199,6 +212,7 @@ impl Default for Config {
             proxy_password: None,
             admin_api_key: None,
             load_balancing_mode: default_load_balancing_mode(),
+            credential_rpm: None,
             extract_thinking: default_extract_thinking(),
             default_endpoint: default_endpoint(),
             endpoints: HashMap::new(),

@@ -69,6 +69,23 @@ fn mask_api_key(key: &str) -> String {
     }
 }
 
+/// 阶段 7.6：把用户配置 credential_rpm 翻译成 RateLimitConfig
+///
+/// - `None` / `0`：返回默认 (1-2s 随机间隔 + 30% 抖动)
+/// - `>0`：固定间隔 = 60000/rpm 毫秒，关闭抖动
+///
+/// 其余字段（daily_max_requests / backoff 三项）保持 default。
+fn build_rate_limit_config(credential_rpm: Option<u32>) -> RateLimitConfig {
+    let mut cfg = RateLimitConfig::default();
+    if let Some(rpm) = credential_rpm.filter(|&v| v > 0) {
+        let interval_ms = (60_000u64 / rpm as u64).max(1);
+        cfg.min_interval_ms = interval_ms;
+        cfg.max_interval_ms = interval_ms;
+        cfg.jitter_percent = 0.0;
+    }
+    cfg
+}
+
 /// 验证 refreshToken 的基本有效性
 pub(crate) fn validate_refresh_token(credentials: &KiroCredentials) -> anyhow::Result<()> {
     let refresh_token = credentials
@@ -591,6 +608,9 @@ impl MultiTokenManager {
         credentials_path: Option<PathBuf>,
         is_multiple_format: bool,
     ) -> anyhow::Result<Self> {
+        // 阶段 7.6：用户配置 credential_rpm 翻译为 RateLimitConfig
+        let rate_limit_config = build_rate_limit_config(config.credential_rpm);
+
         // 计算当前最大 ID，为没有 ID 的凭据分配新 ID
         let max_existing_id = credentials.iter().filter_map(|c| c.id).max().unwrap_or(0);
         let mut next_id = max_existing_id + 1;
@@ -696,7 +716,7 @@ impl MultiTokenManager {
             stats_dirty: AtomicBool::new(false),
             // 阶段 4.3：凭据栈扩展字段就位（caller 阶段 4.4-4.6 接入）
             affinity: UserAffinityManager::new(),
-            rate_limiter: RateLimiter::new(RateLimitConfig::default()),
+            rate_limiter: RateLimiter::new(rate_limit_config),
             cooldown_manager: CooldownManager::new(),
             background_refresher: None,
         };
@@ -857,14 +877,20 @@ impl MultiTokenManager {
                             tracing::warn!(
                                 "所有凭据均已被自动禁用，执行自愈：重置失败计数并重新启用（等价于重启）"
                             );
+                            let mut healed_ids = Vec::new();
                             for e in entries.iter_mut() {
                                 if e.disabled_reason == Some(DisabledReason::TooManyFailures) {
                                     e.disabled = false;
                                     e.disabled_reason = None;
                                     e.failure_count = 0;
+                                    healed_ids.push(e.id);
                                 }
                             }
                             drop(entries);
+                            // 阶段 7.6：自愈同时清空 rate_limiter 的 backoff_until 与连续失败计数
+                            for id in healed_ids {
+                                self.rate_limiter.reset(id);
+                            }
                             best = self.select_next_credential(model);
                         }
                     }
@@ -1217,6 +1243,8 @@ impl MultiTokenManager {
                 );
             }
         }
+        // 阶段 7.6：通知 rate_limiter 增量 daily_count 与重置连续失败计数
+        self.rate_limiter.record_success(id);
         self.save_stats_debounced();
     }
 
@@ -1228,6 +1256,10 @@ impl MultiTokenManager {
     /// # Arguments
     /// * `id` - 凭据 ID（来自 CallContext）
     pub fn report_failure(&self, id: u64) -> bool {
+        // 阶段 7.6：让 rate_limiter 累积指数退避（不携带 body 错误信息，
+        // 用调用方明确的 401/403 等场景；suspend 关键词识别走 report_failure_with_message）
+        self.rate_limiter.record_failure(id, None);
+
         let result = {
             let mut entries = self.entries.lock();
             let mut current_id = self.current_id.lock();
@@ -1278,6 +1310,16 @@ impl MultiTokenManager {
         };
         self.save_stats_debounced();
         result
+    }
+
+    /// 阶段 7.6：报告 rate_limiter 一次"瞬态失败"（429/5xx 等不算 entry.failure_count
+    /// 的场景），允许携带 body 用于 suspend 关键词识别。
+    ///
+    /// 不增加 entry.failure_count（不影响 max-failures 禁用阈值），仅让
+    /// rate_limiter 累积指数退避；若 body 命中 suspend/banned/quota exceeded 等关键词，
+    /// 会触发更长的"自愈式退避"。
+    pub fn report_rate_limiter_failure(&self, id: u64, error_message: Option<&str>) {
+        self.rate_limiter.record_failure(id, error_message);
     }
 
     /// 报告指定凭据额度已用尽
@@ -1701,6 +1743,13 @@ impl MultiTokenManager {
         Ok(())
     }
 
+    /// 阶段 7.6：热更新 credential_rpm，立刻应用到 rate_limiter 配置
+    pub fn update_credential_rpm(&self, rpm: Option<u32>) {
+        let new_cfg = build_rate_limit_config(rpm);
+        self.rate_limiter.update_config(new_cfg);
+        tracing::info!(?rpm, "credential_rpm 已热更新");
+    }
+
     /// 设置凭据 endpoint（Admin API，阶段 7.5）
     ///
     /// `endpoint` 为 None 表示清除该凭据的 endpoint 设置，回退到全局
@@ -1737,6 +1786,10 @@ impl MultiTokenManager {
             entry.disabled = false;
             entry.disabled_reason = None;
         }
+        // 阶段 7.6：清空 rate_limiter 的 backoff_until 与连续失败计数
+        self.rate_limiter.reset(id);
+        // 同时清掉 cooldown（用户主动重置 = 表示"我相信凭据现在可用了"）
+        self.cooldown_manager.clear_cooldown(id);
         // 持久化更改
         self.persist_credentials()?;
         Ok(())
