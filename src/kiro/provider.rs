@@ -326,14 +326,31 @@ impl KiroProvider {
                 Some(body.clone()),
             );
 
-            // 402 额度用尽
-            if status.as_u16() == 402 && endpoint.is_monthly_request_limit(&body) {
-                let has_available = self.token_manager.report_quota_exhausted(ctx.id);
-                if !has_available {
-                    anyhow::bail!("MCP 请求失败（所有凭据已用尽）: {} {}", status, body);
+            // 402 处理：区分超额封顶（软冷却）vs 月度配额耗尽（硬禁用）
+            if status.as_u16() == 402 {
+                if endpoint.is_overage_limit(&body) {
+                    // 阶段 7.12：开了 Kiro 超额且撞到 10000 封顶 → 24h 冷却而非禁用
+                    // 等下个计费周期 / 用户开更高额度 / 主动 get_balance 触发自愈
+                    self.token_manager.set_credential_cooldown_with_duration(
+                        ctx.id,
+                        crate::kiro::cooldown::CooldownReason::QuotaExhausted,
+                        std::time::Duration::from_secs(24 * 3600),
+                    );
+                    tracing::warn!(
+                        "MCP 请求 #{} 超额封顶 (OVERAGE)，已冷却 24h: {}",
+                        ctx.id, body
+                    );
+                    last_error = Some(anyhow::anyhow!("MCP 请求失败（超额）: {} {}", status, body));
+                    continue;
                 }
-                last_error = Some(anyhow::anyhow!("MCP 请求失败: {} {}", status, body));
-                continue;
+                if endpoint.is_monthly_request_limit(&body) {
+                    let has_available = self.token_manager.report_quota_exhausted(ctx.id);
+                    if !has_available {
+                        anyhow::bail!("MCP 请求失败（所有凭据已用尽）: {} {}", status, body);
+                    }
+                    last_error = Some(anyhow::anyhow!("MCP 请求失败: {} {}", status, body));
+                    continue;
+                }
             }
 
             // 400 Bad Request
@@ -546,33 +563,51 @@ impl KiroProvider {
                 Some(body.clone()),
             );
 
-            // 402 Payment Required 且额度用尽：禁用凭据并故障转移
-            if status.as_u16() == 402 && endpoint.is_monthly_request_limit(&body) {
-                tracing::warn!(
-                    "API 请求失败（额度已用尽，禁用凭据并切换，尝试 {}/{}）: {} {}",
-                    attempt + 1,
-                    max_retries,
-                    status,
-                    body
-                );
-
-                let has_available = self.token_manager.report_quota_exhausted(ctx.id);
-                if !has_available {
-                    anyhow::bail!(
-                        "{} API 请求失败（所有凭据已用尽）: {} {}",
-                        api_type,
+            // 402 处理：区分超额封顶（软冷却）vs 月度配额耗尽（硬禁用）
+            if status.as_u16() == 402 {
+                if endpoint.is_overage_limit(&body) {
+                    // 阶段 7.12：开了 Kiro 超额且撞到 10000 封顶 → 24h 冷却而非禁用
+                    self.token_manager.set_credential_cooldown_with_duration(
+                        ctx.id,
+                        crate::kiro::cooldown::CooldownReason::QuotaExhausted,
+                        std::time::Duration::from_secs(24 * 3600),
+                    );
+                    tracing::warn!(
+                        "{} API 请求 #{} 超额封顶 (OVERAGE)，已冷却 24h（尝试 {}/{}）: {}",
+                        api_type, ctx.id, attempt + 1, max_retries, body
+                    );
+                    last_error = Some(anyhow::anyhow!(
+                        "{} API 请求失败（超额）: {} {}", api_type, status, body
+                    ));
+                    continue;
+                }
+                if endpoint.is_monthly_request_limit(&body) {
+                    tracing::warn!(
+                        "API 请求失败（额度已用尽，禁用凭据并切换，尝试 {}/{}）: {} {}",
+                        attempt + 1,
+                        max_retries,
                         status,
                         body
                     );
-                }
 
-                last_error = Some(anyhow::anyhow!(
-                    "{} API 请求失败: {} {}",
-                    api_type,
-                    status,
-                    body
-                ));
-                continue;
+                    let has_available = self.token_manager.report_quota_exhausted(ctx.id);
+                    if !has_available {
+                        anyhow::bail!(
+                            "{} API 请求失败（所有凭据已用尽）: {} {}",
+                            api_type,
+                            status,
+                            body
+                        );
+                    }
+
+                    last_error = Some(anyhow::anyhow!(
+                        "{} API 请求失败: {} {}",
+                        api_type,
+                        status,
+                        body
+                    ));
+                    continue;
+                }
             }
 
             // 400 Bad Request - 请求问题，重试/切换凭据无意义

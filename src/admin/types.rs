@@ -194,12 +194,15 @@ pub struct BalanceResponse {
     pub current_usage: f64,
     /// 使用限额
     pub usage_limit: f64,
-    /// 剩余额度
+    /// 剩余额度（阶段 7.12：允许负数表示已超额；前端按需展示 "+N 超额"）
     pub remaining: f64,
-    /// 使用百分比
+    /// 使用百分比（可超 100%）
     pub usage_percentage: f64,
     /// 下次重置时间（Unix 时间戳）
     pub next_reset_at: Option<f64>,
+    /// 阶段 7.12：是否处于超额区（current >= limit 且 limit > 0）
+    #[serde(default)]
+    pub is_overage: bool,
 }
 
 /// 单个凭据的缓存余额条目（用于 GET /credentials/balances/cached）
@@ -211,11 +214,11 @@ pub struct BalanceResponse {
 pub struct CachedBalanceItem {
     /// 凭据 ID
     pub id: u64,
-    /// 缓存的剩余额度
+    /// 缓存的剩余额度（阶段 7.12：允许负数）
     pub remaining: f64,
     /// 使用限额
     pub usage_limit: f64,
-    /// 使用百分比
+    /// 使用百分比（可超 100%）
     pub usage_percentage: f64,
     /// 订阅类型
     pub subscription_title: Option<String>,
@@ -223,6 +226,9 @@ pub struct CachedBalanceItem {
     pub cached_at: u64,
     /// 缓存存活时间（秒），前端用 `cached_at + ttl_secs * 1000` 计算到期时刻
     pub ttl_secs: u64,
+    /// 阶段 7.12：是否处于超额区
+    #[serde(default)]
+    pub is_overage: bool,
 }
 
 /// `GET /credentials/balances/cached` 响应

@@ -446,6 +446,27 @@ struct CredentialEntry {
     /// 设备指纹（每个凭据独立，模拟真实 Kiro IDE 客户端环境特征）
     #[allow(dead_code)] // 阶段 4.3 字段就位；阶段 4.6 接入 provider header
     fingerprint: Fingerprint,
+    /// 阶段 7.12：最近一次 getUsageLimits 快照（运行期缓存，不持久化）
+    ///
+    /// 用于选号 2-tier 降权：current_usage >= usage_limit 的凭据归入 "超额区" 兜底池，
+    /// 订阅内凭据全不可用时才用。
+    usage_snapshot: Option<UsageSnapshot>,
+}
+
+/// 阶段 7.12：单凭据 usage 运行时快照
+#[derive(Debug, Clone)]
+pub struct UsageSnapshot {
+    pub current_usage: f64,
+    pub usage_limit: f64,
+    pub subscription_title: Option<String>,
+    pub updated_at_unix_sec: i64,
+}
+
+impl UsageSnapshot {
+    /// 是否处于超额区（current >= limit 且 limit > 0）
+    pub fn is_overage(&self) -> bool {
+        self.usage_limit > 0.0 && self.current_usage >= self.usage_limit
+    }
 }
 
 /// 禁用原因
@@ -665,6 +686,7 @@ impl MultiTokenManager {
                     success_count: 0,
                     last_used_at: None,
                     fingerprint,
+                    usage_snapshot: None,
                 }
             })
             .collect();
@@ -801,6 +823,16 @@ impl MultiTokenManager {
             return None;
         }
 
+        // 阶段 7.12：2-tier 降权——订阅内（Tier 1）优先用，超额区（Tier 2）兜底
+        //
+        // 判定依据：entry.usage_snapshot 的 is_overage()。无 snapshot 视为 Tier 1
+        // （冷启动乐观放行），与 Kiro-Go 行为一致。
+        let (tier1, tier2): (Vec<&&CredentialEntry>, Vec<&&CredentialEntry>) = available
+            .iter()
+            .partition(|e| !e.usage_snapshot.as_ref().map(|s| s.is_overage()).unwrap_or(false));
+
+        let pool = if !tier1.is_empty() { tier1 } else { tier2 };
+
         let mode = self.load_balancing_mode.lock().clone();
         let mode = mode.as_str();
 
@@ -808,15 +840,15 @@ impl MultiTokenManager {
             "balanced" => {
                 // Least-Used 策略：选择成功次数最少的凭据
                 // 平局时按优先级排序（数字越小优先级越高）
-                let entry = available
-                    .iter()
+                let entry = pool
+                    .into_iter()
                     .min_by_key(|e| (e.success_count, e.credentials.priority))?;
 
                 Some((entry.id, entry.credentials.clone()))
             }
             _ => {
                 // priority 模式（默认）：选择优先级最高的
-                let entry = available.iter().min_by_key(|e| e.credentials.priority)?;
+                let entry = pool.into_iter().min_by_key(|e| e.credentials.priority)?;
                 Some((entry.id, entry.credentials.clone()))
             }
         }
@@ -1916,7 +1948,71 @@ impl MultiTokenManager {
             }
         }
 
+        // 阶段 7.12：写入 UsageSnapshot 给 select_next_credential 2-tier 判断用
+        let current = usage_limits.current_usage();
+        let limit = usage_limits.usage_limit();
+        {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                entry.usage_snapshot = Some(UsageSnapshot {
+                    current_usage: current,
+                    usage_limit: limit,
+                    subscription_title: usage_limits
+                        .subscription_title()
+                        .map(|s| s.to_string()),
+                    updated_at_unix_sec: Utc::now().timestamp(),
+                });
+            }
+        }
+
+        // 阶段 7.12：如果当前不在超额状态，且凭据处于 QuotaExceeded 冷却 / 禁用 → 自动恢复
+        self.try_auto_recover_from_quota(id, current, limit);
+
         Ok(usage_limits)
+    }
+
+    /// 阶段 7.12：拿到最新 usage 后尝试自动恢复 QuotaExceeded 状态
+    ///
+    /// 仅对 reason=QuotaExceeded 生效，不影响 Manual / InvalidConfig 等其他禁用。
+    /// 触发条件：limit > 0 且 current < limit（额度有剩余）。
+    pub fn try_auto_recover_from_quota(&self, id: u64, current: f64, limit: f64) {
+        if limit <= 0.0 || current >= limit {
+            return;
+        }
+
+        let mut recovered_cooldown = false;
+        let mut recovered_disabled = false;
+
+        // 路径 1：清除 QuotaExhausted 冷却
+        if let Some((reason, _)) = self.cooldown_manager.check_cooldown(id) {
+            if reason == CooldownReason::QuotaExhausted {
+                self.cooldown_manager.clear_cooldown(id);
+                recovered_cooldown = true;
+            }
+        }
+
+        // 路径 2：清除 QuotaExceeded 禁用（兼容旧 report_quota_exhausted 落下的状态）
+        {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                if entry.disabled
+                    && entry.disabled_reason == Some(DisabledReason::QuotaExceeded)
+                {
+                    entry.disabled = false;
+                    entry.disabled_reason = None;
+                    entry.failure_count = 0;
+                    recovered_disabled = true;
+                }
+            }
+        }
+
+        if recovered_cooldown || recovered_disabled {
+            tracing::info!(
+                "凭据 #{} 额度已恢复（current={:.0} < limit={:.0}），quota 状态已清除 \
+                 (cooldown={}, disabled={})",
+                id, current, limit, recovered_cooldown, recovered_disabled,
+            );
+        }
     }
 
     /// 添加新凭据（Admin API）
@@ -2048,6 +2144,7 @@ impl MultiTokenManager {
                 success_count: 0,
                 last_used_at: None,
                 fingerprint,
+                usage_snapshot: None,
             });
         }
 
@@ -2886,5 +2983,221 @@ mod tests {
 
         assert_eq!(credentials.effective_auth_region(&config), "auth-only");
         assert_eq!(credentials.effective_api_region(&config), "api-only");
+    }
+
+    // ========================================================================
+    // 阶段 7.12 测试：超额区识别 + 2-tier 选号 + QuotaExhausted 自愈
+    // ========================================================================
+
+    fn make_oauth_cred(priority: u32, refresh_token: &str) -> KiroCredentials {
+        let mut cred = KiroCredentials::default();
+        cred.priority = priority;
+        cred.refresh_token = Some(refresh_token.to_string());
+        cred.access_token = Some("dummy".to_string());
+        cred.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+        cred
+    }
+
+    #[test]
+    fn test_usage_snapshot_is_overage() {
+        assert!(UsageSnapshot {
+            current_usage: 1000.0,
+            usage_limit: 1000.0,
+            subscription_title: None,
+            updated_at_unix_sec: 0,
+        }
+        .is_overage());
+
+        assert!(UsageSnapshot {
+            current_usage: 1500.0,
+            usage_limit: 1000.0,
+            subscription_title: None,
+            updated_at_unix_sec: 0,
+        }
+        .is_overage());
+
+        assert!(!UsageSnapshot {
+            current_usage: 900.0,
+            usage_limit: 1000.0,
+            subscription_title: None,
+            updated_at_unix_sec: 0,
+        }
+        .is_overage());
+
+        // limit=0 视为未知，不算超额
+        assert!(!UsageSnapshot {
+            current_usage: 100.0,
+            usage_limit: 0.0,
+            subscription_title: None,
+            updated_at_unix_sec: 0,
+        }
+        .is_overage());
+    }
+
+    #[test]
+    fn test_select_next_credential_prefers_non_overage_tier1() {
+        // 阶段 7.12：cred A (priority=0, 超额) + cred B (priority=1, 订阅内)
+        // 期望选 B 即使 A priority 更高
+        let manager = MultiTokenManager::new(
+            Config::default(),
+            vec![make_oauth_cred(0, "a"), make_oauth_cred(1, "b")],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // 注入 usage_snapshot
+        {
+            let mut entries = manager.entries.lock();
+            entries[0].usage_snapshot = Some(UsageSnapshot {
+                current_usage: 1000.0,
+                usage_limit: 1000.0, // 超额
+                subscription_title: None,
+                updated_at_unix_sec: 0,
+            });
+            entries[1].usage_snapshot = Some(UsageSnapshot {
+                current_usage: 100.0,
+                usage_limit: 1000.0, // 订阅内
+                subscription_title: None,
+                updated_at_unix_sec: 0,
+            });
+        }
+
+        let (id, _) = manager.select_next_credential(None).unwrap();
+        // ID 自动分配从 1 开始；B 是第二个 → id=2
+        assert_eq!(id, 2, "应选 Tier 1 的 B 而非 Tier 2 的 A");
+    }
+
+    #[test]
+    fn test_select_next_credential_falls_back_to_overage_tier2() {
+        // 阶段 7.12：所有凭据都超额 → 应回退到 Tier 2 选 priority 高的
+        let manager = MultiTokenManager::new(
+            Config::default(),
+            vec![make_oauth_cred(0, "a"), make_oauth_cred(1, "b")],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        {
+            let mut entries = manager.entries.lock();
+            for entry in entries.iter_mut() {
+                entry.usage_snapshot = Some(UsageSnapshot {
+                    current_usage: 1500.0,
+                    usage_limit: 1000.0,
+                    subscription_title: None,
+                    updated_at_unix_sec: 0,
+                });
+            }
+        }
+
+        let (id, _) = manager.select_next_credential(None).unwrap();
+        // Tier 1 空 → 用 Tier 2 priority=0 的 A
+        assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn test_select_next_credential_no_snapshot_treated_as_tier1() {
+        // 阶段 7.12：无 snapshot（冷启动）= 乐观放行进 Tier 1
+        let manager = MultiTokenManager::new(
+            Config::default(),
+            vec![make_oauth_cred(0, "a"), make_oauth_cred(1, "b")],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // 一个有超额 snapshot、一个无 snapshot
+        {
+            let mut entries = manager.entries.lock();
+            entries[0].usage_snapshot = Some(UsageSnapshot {
+                current_usage: 1500.0,
+                usage_limit: 1000.0,
+                subscription_title: None,
+                updated_at_unix_sec: 0,
+            });
+            // entries[1].usage_snapshot 保持 None
+        }
+
+        let (id, _) = manager.select_next_credential(None).unwrap();
+        // 无 snapshot 的 B 进 Tier 1，应优先；A 有 snapshot 且超额进 Tier 2
+        assert_eq!(id, 2);
+    }
+
+    #[test]
+    fn test_try_auto_recover_from_quota_clears_cooldown() {
+        let manager = MultiTokenManager::new(
+            Config::default(),
+            vec![make_oauth_cred(0, "a")],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // 设置 QuotaExhausted 冷却
+        manager.cooldown_manager.set_cooldown_with_duration(
+            1,
+            crate::kiro::cooldown::CooldownReason::QuotaExhausted,
+            Some(std::time::Duration::from_secs(86400)),
+        );
+        assert!(manager.cooldown_manager.check_cooldown(1).is_some());
+
+        // 调用自愈：current < limit
+        manager.try_auto_recover_from_quota(1, 100.0, 1000.0);
+
+        // 冷却应已清除
+        assert!(manager.cooldown_manager.check_cooldown(1).is_none());
+    }
+
+    #[test]
+    fn test_try_auto_recover_from_quota_no_op_when_still_overage() {
+        let manager = MultiTokenManager::new(
+            Config::default(),
+            vec![make_oauth_cred(0, "a")],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        manager.cooldown_manager.set_cooldown_with_duration(
+            1,
+            crate::kiro::cooldown::CooldownReason::QuotaExhausted,
+            Some(std::time::Duration::from_secs(86400)),
+        );
+
+        // 仍处于超额（current >= limit）
+        manager.try_auto_recover_from_quota(1, 1500.0, 1000.0);
+
+        // 冷却应保留
+        assert!(manager.cooldown_manager.check_cooldown(1).is_some());
+    }
+
+    #[test]
+    fn test_try_auto_recover_does_not_touch_other_reasons() {
+        let manager = MultiTokenManager::new(
+            Config::default(),
+            vec![make_oauth_cred(0, "a")],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // 设 RateLimitExceeded 冷却（非 QuotaExhausted）
+        manager.cooldown_manager.set_cooldown_with_duration(
+            1,
+            crate::kiro::cooldown::CooldownReason::RateLimitExceeded,
+            Some(std::time::Duration::from_secs(60)),
+        );
+
+        manager.try_auto_recover_from_quota(1, 100.0, 1000.0);
+
+        // 应保留——只清 QuotaExhausted 类
+        assert!(manager.cooldown_manager.check_cooldown(1).is_some());
     }
 }

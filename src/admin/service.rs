@@ -509,6 +509,12 @@ impl AdminService {
     }
 
     /// 从上游获取余额（无缓存）
+    ///
+    /// 阶段 7.12：
+    /// - `remaining` 不再 clamp 到 0，允许负数表达"已超额 N"
+    /// - `usage_percentage` 不再 clamp 到 100，允许 > 100%
+    /// - 新增 `is_overage` 标志（current >= limit 且 limit > 0）
+    /// - `get_usage_limits_for` 内部已写入 entry.usage_snapshot 并触发 QuotaExhausted 自愈
     async fn fetch_balance(&self, id: u64) -> Result<BalanceResponse, AdminServiceError> {
         let usage = self
             .token_manager
@@ -518,12 +524,14 @@ impl AdminService {
 
         let current_usage = usage.current_usage();
         let usage_limit = usage.usage_limit();
-        let remaining = (usage_limit - current_usage).max(0.0);
+        // 允许负数：current > limit 时 remaining 为负
+        let remaining = usage_limit - current_usage;
         let usage_percentage = if usage_limit > 0.0 {
-            (current_usage / usage_limit * 100.0).min(100.0)
+            (current_usage / usage_limit) * 100.0
         } else {
             0.0
         };
+        let is_overage = usage_limit > 0.0 && current_usage >= usage_limit;
 
         Ok(BalanceResponse {
             id,
@@ -533,6 +541,7 @@ impl AdminService {
             remaining,
             usage_percentage,
             next_reset_at: usage.next_date_reset,
+            is_overage,
         })
     }
 
@@ -553,6 +562,7 @@ impl AdminService {
                 subscription_title: cached.data.subscription_title.clone(),
                 cached_at: (cached.cached_at * 1000.0).max(0.0) as u64,
                 ttl_secs,
+                is_overage: cached.data.is_overage,
             })
             .collect();
         CachedBalancesResponse { balances }

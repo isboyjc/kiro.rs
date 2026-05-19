@@ -73,6 +73,15 @@ pub trait KiroEndpoint: Send + Sync {
         default_is_monthly_request_limit(body)
     }
 
+    /// 阶段 7.12：判断响应体是否表示"超额封顶"（用户开了 Kiro 超额且已到上限）
+    ///
+    /// 与 `is_monthly_request_limit` 的区别：
+    /// - MONTHLY_REQUEST_COUNT: 未开超额时撞到基础订阅额度（如 Pro 1000）→ 当前禁用
+    /// - OVERAGE: 开了超额但撞到超额封顶（如 Pro 10000）→ 软冷却 24h 等下个周期
+    fn is_overage_limit(&self, body: &str) -> bool {
+        default_is_overage_limit(body)
+    }
+
     /// 判断响应体是否表示"上游 bearer token 失效"（触发强制刷新）
     fn is_bearer_token_invalid(&self, body: &str) -> bool {
         default_is_bearer_token_invalid(body)
@@ -119,6 +128,31 @@ pub fn default_is_monthly_request_limit(body: &str) -> bool {
         .is_some_and(|v| v == "MONTHLY_REQUEST_COUNT")
 }
 
+/// 阶段 7.12：默认的 OVERAGE 判断逻辑
+///
+/// 与 Kiro-Go 的 `checkOverageError` (handler.go:1297) 对齐——简单关键词匹配，
+/// 同时检查 JSON 结构化字段以增强健壮性。
+pub fn default_is_overage_limit(body: &str) -> bool {
+    let upper = body.to_uppercase();
+    if upper.contains("OVERAGE") {
+        return true;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    if value
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .is_some_and(|v| v.to_uppercase().contains("OVERAGE"))
+    {
+        return true;
+    }
+    value
+        .pointer("/error/reason")
+        .and_then(|v| v.as_str())
+        .is_some_and(|v| v.to_uppercase().contains("OVERAGE"))
+}
+
 /// 默认的 bearer token 失效判断逻辑
 pub fn default_is_bearer_token_invalid(body: &str) -> bool {
     body.contains("The bearer token included in the request is invalid")
@@ -144,6 +178,25 @@ mod tests {
     fn test_default_monthly_request_limit_false() {
         let body = r#"{"message":"nope","reason":"DAILY_REQUEST_COUNT"}"#;
         assert!(!default_is_monthly_request_limit(body));
+    }
+
+    // 阶段 7.12：OVERAGE 检测测试
+    #[test]
+    fn test_default_overage_limit_keyword() {
+        assert!(default_is_overage_limit("User exceeded OVERAGE cap"));
+        assert!(default_is_overage_limit("overage limit reached"));
+    }
+
+    #[test]
+    fn test_default_overage_limit_structured_reason() {
+        assert!(default_is_overage_limit(r#"{"reason":"OVERAGE_CAP_REACHED"}"#));
+        assert!(default_is_overage_limit(r#"{"error":{"reason":"OVERAGE"}}"#));
+    }
+
+    #[test]
+    fn test_default_overage_limit_false() {
+        assert!(!default_is_overage_limit(r#"{"reason":"MONTHLY_REQUEST_COUNT"}"#));
+        assert!(!default_is_overage_limit("just a normal message"));
     }
 
     #[test]
