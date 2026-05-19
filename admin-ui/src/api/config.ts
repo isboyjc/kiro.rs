@@ -3,6 +3,7 @@ import { storage } from '@/lib/storage'
 import type {
   ConfigJson,
   ConfigRawResponse,
+  ConfigSchemaResponse,
   ConfigValidateResponse,
   ConfigUpdateResponse,
 } from '@/types/api'
@@ -29,6 +30,12 @@ export async function getConfig(): Promise<ConfigJson> {
 /** GET /api/admin/config/raw — 原始 JSON 文本 */
 export async function getConfigRaw(): Promise<ConfigRawResponse> {
   const { data } = await api.get<ConfigRawResponse>('/config/raw')
+  return data
+}
+
+/** GET /api/admin/config/schema — 字段元数据 */
+export async function getConfigSchema(): Promise<ConfigSchemaResponse> {
+  const { data } = await api.get<ConfigSchemaResponse>('/config/schema')
   return data
 }
 

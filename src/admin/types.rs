@@ -453,3 +453,58 @@ pub struct ConfigUpdateResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_api_key: Option<String>,
 }
+
+/// `GET /config/schema` 响应：字段元数据，前端按此渲染可视化表单
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigSchemaResponse {
+    pub groups: Vec<ConfigSchemaGroup>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigSchemaGroup {
+    pub id: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub needs_restart: bool,
+    pub sensitive: bool,
+    pub fields: Vec<ConfigSchemaField>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigSchemaField {
+    /// 点号路径：`compression.enabled` 或 `host`
+    pub key: String,
+    pub label: String,
+    /// `string` | `number` | `boolean` | `enum`
+    #[serde(rename = "type")]
+    pub field_type: String,
+    pub needs_restart: bool,
+    pub sensitive: bool,
+    /// 是否可选 null（前端展示"未配置"）
+    pub nullable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub enum_options: Vec<ConfigSchemaEnumOption>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigSchemaEnumOption {
+    pub value: String,
+    pub label: String,
+}

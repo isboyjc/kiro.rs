@@ -9,10 +9,11 @@ use super::{
     handlers::{
         add_credential, delete_credential, force_refresh_token, get_all_credentials,
         get_cached_balances, get_compression_config, get_config, get_config_raw,
-        get_credential_balance, get_load_balancing_mode, get_prompt_cache_config,
-        import_token_json, reset_failure_count, set_credential_disabled,
-        set_credential_priority, set_load_balancing_mode, update_compression_config,
-        update_config, update_prompt_cache_config, validate_config,
+        get_config_schema, get_credential_balance, get_load_balancing_mode,
+        get_prompt_cache_config, import_token_json, reset_failure_count,
+        set_credential_disabled, set_credential_priority, set_load_balancing_mode,
+        update_compression_config, update_config, update_prompt_cache_config,
+        validate_config,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -67,6 +68,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
         )
         // 阶段 7：配置面板（Raw JSON / 可视化共用）
         .route("/config/raw", get(get_config_raw))
+        .route("/config/schema", get(get_config_schema))
         .route("/config/validate", post(validate_config))
         .route("/config", get(get_config).put(update_config))
         .layer(middleware::from_fn_with_state(

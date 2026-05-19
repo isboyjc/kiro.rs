@@ -13,8 +13,9 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { storage } from '@/lib/storage'
 import { extractErrorMessage } from '@/lib/utils'
-import { useConfigRaw, useUpdateConfig, useValidateConfig } from '@/hooks/use-config'
+import { useConfigRaw, useConfigSchema, useUpdateConfig, useValidateConfig } from '@/hooks/use-config'
 import type { ConfigFieldError, ConfigJson, ConfigUpdateResponse } from '@/types/api'
+import { ConfigForm } from '@/components/config-form'
 
 interface SettingsDialogProps {
   open: boolean
@@ -39,7 +40,7 @@ const EMPTY_VALIDATION: ValidationState = {
 }
 
 export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
-  const [tab, setTab] = useState<TabKey>('raw')
+  const [tab, setTab] = useState<TabKey>('form')
   const [text, setText] = useState('')
   const [originalText, setOriginalText] = useState('')
   const [validation, setValidation] = useState<ValidationState>(EMPTY_VALIDATION)
@@ -47,6 +48,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   const [pendingPayload, setPendingPayload] = useState<ConfigJson | null>(null)
 
   const { data: rawData, isLoading: isLoadingRaw, refetch: refetchRaw } = useConfigRaw(open)
+  const { data: schemaData, isLoading: isLoadingSchema } = useConfigSchema(open)
   const { mutateAsync: validateMutate, isPending: isValidating } = useValidateConfig()
   const { mutateAsync: updateMutate, isPending: isUpdating } = useUpdateConfig()
 
@@ -195,6 +197,16 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
           <div className="flex border-b">
             <button
               className={`px-3 py-2 text-sm border-b-2 ${
+                tab === 'form'
+                  ? 'border-primary text-primary font-medium'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+              }`}
+              onClick={() => setTab('form')}
+            >
+              可视化表单
+            </button>
+            <button
+              className={`px-3 py-2 text-sm border-b-2 ${
                 tab === 'raw'
                   ? 'border-primary text-primary font-medium'
                   : 'border-transparent text-muted-foreground hover:text-foreground'
@@ -202,21 +214,42 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
               onClick={() => setTab('raw')}
             >
               Raw JSON
-            </button>
-            <button
-              className={`px-3 py-2 text-sm border-b-2 ${
-                tab === 'form'
-                  ? 'border-primary text-primary font-medium'
-                  : 'border-transparent text-muted-foreground hover:text-foreground'
-              }`}
-              onClick={() => setTab('form')}
-              disabled
-              title="Phase 3 待实施"
-            >
-              可视化表单
-              <span className="text-xs ml-1 opacity-60">(即将推出)</span>
+              {parseError && (
+                <span className="text-red-500 ml-1" title={parseError}>●</span>
+              )}
             </button>
           </div>
+
+          {/* 可视化表单 */}
+          {tab === 'form' && (
+            <div className="space-y-3">
+              {isLoadingSchema || isLoadingRaw || !parsed ? (
+                <div className="flex items-center justify-center py-8">
+                  {parseError ? (
+                    <div className="text-red-600 text-sm flex items-center gap-2">
+                      <AlertCircle className="h-4 w-4" />
+                      Raw JSON 当前无法解析，请切到 Raw 标签修复后再使用表单
+                    </div>
+                  ) : (
+                    <Loader2 className="h-6 w-6 animate-spin" />
+                  )}
+                </div>
+              ) : schemaData ? (
+                <ConfigForm
+                  schema={schemaData}
+                  value={parsed}
+                  onChange={(next) => {
+                    // 用 2 空格缩进序列化回 text，保持与 raw 同步
+                    setText(JSON.stringify(next, null, 2))
+                    setValidation(EMPTY_VALIDATION)
+                  }}
+                />
+              ) : null}
+              {hasChanges && (
+                <Badge variant="outline" className="text-amber-600">未保存修改</Badge>
+              )}
+            </div>
+          )}
 
           {/* Raw JSON 编辑区 */}
           {tab === 'raw' && (

@@ -214,6 +214,12 @@ pub async fn get_config_raw(State(state): State<AdminState>) -> impl IntoRespons
     }
 }
 
+/// GET /api/admin/config/schema
+/// 字段元数据（前端按此渲染可视化表单）
+pub async fn get_config_schema(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_config_schema())
+}
+
 /// POST /api/admin/config/validate
 /// 仅校验，不写盘
 pub async fn validate_config(

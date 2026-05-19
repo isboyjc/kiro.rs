@@ -62,6 +62,43 @@ export interface ConfigUpdateResponse {
   newApiKey?: string
 }
 
+export type ConfigFieldType = 'string' | 'number' | 'boolean' | 'enum'
+
+export interface ConfigSchemaEnumOption {
+  value: string
+  label: string
+}
+
+export interface ConfigSchemaField {
+  /** 点号路径：`compression.enabled` 或 `host` */
+  key: string
+  label: string
+  type: ConfigFieldType
+  needsRestart: boolean
+  sensitive: boolean
+  nullable: boolean
+  description?: string
+  warning?: string
+  defaultValue?: unknown
+  min?: number
+  max?: number
+  enumOptions?: ConfigSchemaEnumOption[]
+  placeholder?: string
+}
+
+export interface ConfigSchemaGroup {
+  id: string
+  label: string
+  description?: string
+  needsRestart: boolean
+  sensitive: boolean
+  fields: ConfigSchemaField[]
+}
+
+export interface ConfigSchemaResponse {
+  groups: ConfigSchemaGroup[]
+}
+
 // 缓存余额条目（来自 GET /credentials/balances/cached，纯磁盘缓存快照）
 export interface CachedBalanceInfo {
   id: number

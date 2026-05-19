@@ -16,7 +16,8 @@ use crate::model::config::CompressionConfig;
 use super::error::AdminServiceError;
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, BalanceResponse, CachedBalanceItem,
-    CachedBalancesResponse, ConfigFieldError, ConfigRawResponse, ConfigUpdateResponse,
+    CachedBalancesResponse, ConfigFieldError, ConfigRawResponse, ConfigSchemaEnumOption,
+    ConfigSchemaField, ConfigSchemaGroup, ConfigSchemaResponse, ConfigUpdateResponse,
     ConfigValidateResponse, CredentialStatusItem, CredentialsStatusResponse, ImportAction,
     ImportItemResult, ImportSummary, ImportTokenJsonRequest, ImportTokenJsonResponse,
     LoadBalancingModeResponse, PromptCacheConfigResponse, SetLoadBalancingModeRequest,
@@ -776,6 +777,11 @@ impl AdminService {
             .map_err(|e| AdminServiceError::InternalError(format!("读取配置失败: {}", e)))
     }
 
+    /// `GET /config/schema` — 字段元数据，前端按此渲染可视化表单
+    pub fn get_config_schema(&self) -> ConfigSchemaResponse {
+        build_config_schema()
+    }
+
     /// `GET /config/raw` — 返回原始 JSON 文本
     pub fn get_config_raw(&self) -> Result<ConfigRawResponse, AdminServiceError> {
         let content = std::fs::read_to_string(&self.config_path).map_err(|e| {
@@ -1001,4 +1007,339 @@ fn diff_config_fields(old: &Config, new: &Config) -> (Vec<String>, Vec<String>) 
     diff!(endpoints, "endpoints", restart);
 
     (needs_restart, hot_reload)
+}
+
+// ============================================================================
+// 配置 Schema 构建（手写元数据，前端按此渲染可视化表单）
+// ============================================================================
+
+fn s(s: &str) -> String {
+    s.to_string()
+}
+
+fn field(
+    key: &str,
+    label: &str,
+    field_type: &str,
+    needs_restart: bool,
+    description: &str,
+) -> ConfigSchemaField {
+    ConfigSchemaField {
+        key: s(key),
+        label: s(label),
+        field_type: s(field_type),
+        needs_restart,
+        sensitive: false,
+        nullable: false,
+        description: Some(s(description)),
+        warning: None,
+        default_value: None,
+        min: None,
+        max: None,
+        enum_options: Vec::new(),
+        placeholder: None,
+    }
+}
+
+fn build_config_schema() -> ConfigSchemaResponse {
+    use serde_json::json;
+
+    let groups = vec![
+        // ===== 服务监听 =====
+        ConfigSchemaGroup {
+            id: s("server"),
+            label: s("服务监听"),
+            description: Some(s("HTTP 服务的监听地址与端口")),
+            needs_restart: true,
+            sensitive: false,
+            fields: vec![
+                ConfigSchemaField {
+                    placeholder: Some(s("127.0.0.1")),
+                    default_value: Some(json!("127.0.0.1")),
+                    warning: Some(s("改成 0.0.0.0 会暴露到公网，请确保配合 apiKey 防护")),
+                    ..field("host", "监听地址", "string", true, "服务绑定的 IP")
+                },
+                ConfigSchemaField {
+                    min: Some(1.0),
+                    max: Some(65535.0),
+                    default_value: Some(json!(8990)),
+                    ..field("port", "监听端口", "number", true, "1-65535")
+                },
+            ],
+        },
+        // ===== 鉴权 =====
+        ConfigSchemaGroup {
+            id: s("auth"),
+            label: s("鉴权（敏感）"),
+            description: Some(s("API Key 与 Admin API Key，改 adminApiKey 当场热轮换")),
+            needs_restart: false,
+            sensitive: true,
+            fields: vec![
+                ConfigSchemaField {
+                    sensitive: true,
+                    needs_restart: false,
+                    placeholder: Some(s("sk-kiro-rs-...")),
+                    ..field("apiKey", "API Key", "string", false, "客户端调 /v1/messages 时认证用")
+                },
+                ConfigSchemaField {
+                    sensitive: true,
+                    nullable: true,
+                    needs_restart: false,
+                    placeholder: Some(s("sk-admin-...")),
+                    warning: Some(s("修改后当前面板会自动用新值重连；其他使用旧值的工具立即失效")),
+                    ..field("adminApiKey", "Admin API Key", "string", false, "Admin 端点与 Web 面板认证用")
+                },
+            ],
+        },
+        // ===== 区域 =====
+        ConfigSchemaGroup {
+            id: s("region"),
+            label: s("AWS 区域"),
+            description: Some(s("Token 刷新与 API 请求的 AWS Region")),
+            needs_restart: true,
+            sensitive: false,
+            fields: vec![
+                ConfigSchemaField {
+                    default_value: Some(json!("us-east-1")),
+                    placeholder: Some(s("us-east-1")),
+                    ..field("region", "默认 Region", "string", true, "Auth/API 都未单独配时回退至此")
+                },
+                ConfigSchemaField {
+                    nullable: true,
+                    placeholder: Some(s("不配则用 region")),
+                    ..field("authRegion", "Auth Region", "string", true, "Token 刷新使用")
+                },
+                ConfigSchemaField {
+                    nullable: true,
+                    placeholder: Some(s("不配则用 region")),
+                    ..field("apiRegion", "API Region", "string", true, "API 请求使用")
+                },
+            ],
+        },
+        // ===== Kiro 元数据 =====
+        ConfigSchemaGroup {
+            id: s("kiroMeta"),
+            label: s("Kiro 请求元数据"),
+            description: Some(s("伪装客户端版本号、机器码等，写入上游请求头")),
+            needs_restart: true,
+            sensitive: false,
+            fields: vec![
+                ConfigSchemaField {
+                    default_value: Some(json!("0.9.2")),
+                    ..field("kiroVersion", "Kiro 版本", "string", true, "客户端版本号")
+                },
+                ConfigSchemaField {
+                    nullable: true,
+                    placeholder: Some(s("64 位十六进制，不填自动生成")),
+                    ..field("machineId", "Machine ID", "string", true, "客户端机器码")
+                },
+                ConfigSchemaField {
+                    ..field("systemVersion", "系统版本", "string", true, "如 darwin#24.6.0")
+                },
+                ConfigSchemaField {
+                    default_value: Some(json!("22.21.1")),
+                    ..field("nodeVersion", "Node 版本", "string", true, "Node.js 版本标识")
+                },
+            ],
+        },
+        // ===== TLS & 代理 =====
+        ConfigSchemaGroup {
+            id: s("network"),
+            label: s("TLS & 代理"),
+            description: Some(s("HTTP 客户端配置，凭据级代理在凭据列表里单独设")),
+            needs_restart: true,
+            sensitive: false,
+            fields: vec![
+                ConfigSchemaField {
+                    enum_options: vec![
+                        ConfigSchemaEnumOption { value: s("rustls"), label: s("rustls") },
+                        ConfigSchemaEnumOption { value: s("native-tls"), label: s("native-tls") },
+                    ],
+                    default_value: Some(json!("rustls")),
+                    ..field("tlsBackend", "TLS 后端", "enum", true, "rustls 兼容性好，native-tls 走系统证书库")
+                },
+                ConfigSchemaField {
+                    nullable: true,
+                    placeholder: Some(s("http://127.0.0.1:7890")),
+                    ..field("proxyUrl", "代理 URL", "string", true, "HTTP / SOCKS5，留空禁用")
+                },
+                ConfigSchemaField {
+                    nullable: true,
+                    ..field("proxyUsername", "代理用户名", "string", true, "可选")
+                },
+                ConfigSchemaField {
+                    sensitive: true,
+                    nullable: true,
+                    ..field("proxyPassword", "代理密码", "string", true, "可选")
+                },
+            ],
+        },
+        // ===== Count Tokens =====
+        ConfigSchemaGroup {
+            id: s("countTokens"),
+            label: s("外部 count_tokens API"),
+            description: Some(s("用外部 API 替代本地 token 计数（可选）")),
+            needs_restart: true,
+            sensitive: false,
+            fields: vec![
+                ConfigSchemaField {
+                    nullable: true,
+                    placeholder: Some(s("https://api.example.com/v1/messages/count_tokens")),
+                    ..field("countTokensApiUrl", "URL", "string", true, "外部 count_tokens 端点")
+                },
+                ConfigSchemaField {
+                    sensitive: true,
+                    nullable: true,
+                    ..field("countTokensApiKey", "API Key", "string", true, "外部 API 鉴权 key")
+                },
+                ConfigSchemaField {
+                    enum_options: vec![
+                        ConfigSchemaEnumOption { value: s("x-api-key"), label: s("x-api-key Header") },
+                        ConfigSchemaEnumOption { value: s("bearer"), label: s("Bearer Token") },
+                    ],
+                    default_value: Some(json!("x-api-key")),
+                    ..field("countTokensAuthType", "认证方式", "enum", true, "")
+                },
+            ],
+        },
+        // ===== 凭据栈策略 =====
+        ConfigSchemaGroup {
+            id: s("credPool"),
+            label: s("凭据栈策略"),
+            description: Some(s("号池选号 / Thinking / 默认端点")),
+            needs_restart: false,
+            sensitive: false,
+            fields: vec![
+                ConfigSchemaField {
+                    enum_options: vec![
+                        ConfigSchemaEnumOption { value: s("priority"), label: s("优先级（按 priority 排序）") },
+                        ConfigSchemaEnumOption { value: s("balanced"), label: s("均衡负载（按余额）") },
+                    ],
+                    default_value: Some(json!("priority")),
+                    ..field("loadBalancingMode", "负载均衡", "enum", false, "热生效")
+                },
+                ConfigSchemaField {
+                    default_value: Some(json!(true)),
+                    needs_restart: false,
+                    ..field("extractThinking", "提取 thinking 块", "boolean", false, "非流式响应中解析 <thinking>")
+                },
+                ConfigSchemaField {
+                    enum_options: vec![
+                        ConfigSchemaEnumOption { value: s("ide"), label: s("IDE") },
+                        ConfigSchemaEnumOption { value: s("cli"), label: s("CLI") },
+                    ],
+                    default_value: Some(json!("ide")),
+                    ..field("defaultEndpoint", "默认端点", "enum", true, "凭据未指定 endpoint 时回退")
+                },
+            ],
+        },
+        // ===== 输入压缩 =====
+        ConfigSchemaGroup {
+            id: s("compression"),
+            label: s("输入压缩 / 图片处理"),
+            description: Some(s("阶段 3.2 引入的四层压缩管道，全部热生效")),
+            needs_restart: false,
+            sensitive: false,
+            fields: vec![
+                ConfigSchemaField {
+                    default_value: Some(json!(true)),
+                    ..field("compression.enabled", "总开关", "boolean", false, "关闭后所有压缩与图片处理跳过")
+                },
+                ConfigSchemaField {
+                    default_value: Some(json!(true)),
+                    ..field("compression.whitespaceCompression", "压缩多余空白", "boolean", false, "")
+                },
+                ConfigSchemaField {
+                    enum_options: vec![
+                        ConfigSchemaEnumOption { value: s("keep"), label: s("保留") },
+                        ConfigSchemaEnumOption { value: s("strip"), label: s("剥离") },
+                        ConfigSchemaEnumOption { value: s("summarize"), label: s("摘要") },
+                    ],
+                    default_value: Some(json!("keep")),
+                    ..field("compression.thinkingStrategy", "Thinking 策略", "enum", false, "如何处理历史中的 thinking 块")
+                },
+                ConfigSchemaField {
+                    min: Some(0.0),
+                    default_value: Some(json!(8000)),
+                    ..field("compression.toolResultMaxChars", "工具结果最大字符", "number", false, "超长则首尾截断")
+                },
+                ConfigSchemaField {
+                    min: Some(0.0),
+                    default_value: Some(json!(80)),
+                    ..field("compression.toolResultHeadLines", "保留头部行数", "number", false, "")
+                },
+                ConfigSchemaField {
+                    min: Some(0.0),
+                    default_value: Some(json!(40)),
+                    ..field("compression.toolResultTailLines", "保留尾部行数", "number", false, "")
+                },
+                ConfigSchemaField {
+                    min: Some(0.0),
+                    default_value: Some(json!(6000)),
+                    ..field("compression.toolUseInputMaxChars", "工具调用输入最大字符", "number", false, "")
+                },
+                ConfigSchemaField {
+                    min: Some(0.0),
+                    default_value: Some(json!(4000)),
+                    ..field("compression.toolDescriptionMaxChars", "工具描述最大字符", "number", false, "")
+                },
+                ConfigSchemaField {
+                    min: Some(0.0),
+                    default_value: Some(json!(80)),
+                    ..field("compression.maxHistoryTurns", "历史轮次上限", "number", false, "超出则丢弃最早")
+                },
+                ConfigSchemaField {
+                    min: Some(0.0),
+                    default_value: Some(json!(400_000)),
+                    ..field("compression.maxHistoryChars", "历史字符上限", "number", false, "")
+                },
+                ConfigSchemaField {
+                    min: Some(0.0),
+                    default_value: Some(json!(4000)),
+                    ..field("compression.imageMaxLongEdge", "图片最长边", "number", false, "缩放阈值")
+                },
+                ConfigSchemaField {
+                    min: Some(0.0),
+                    default_value: Some(json!(4_000_000)),
+                    ..field("compression.imageMaxPixelsSingle", "单图像素上限", "number", false, "")
+                },
+                ConfigSchemaField {
+                    min: Some(0.0),
+                    default_value: Some(json!(4_000_000)),
+                    ..field("compression.imageMaxPixelsMulti", "多图像素上限", "number", false, "")
+                },
+                ConfigSchemaField {
+                    min: Some(0.0),
+                    default_value: Some(json!(20)),
+                    ..field("compression.imageMultiThreshold", "多图触发阈值", "number", false, "图片数量超过则用多图限制")
+                },
+                ConfigSchemaField {
+                    min: Some(0.0),
+                    default_value: Some(json!(0)),
+                    ..field("compression.maxRequestBodyBytes", "请求体上限（字节）", "number", false, "0 = 无限制")
+                },
+            ],
+        },
+        // ===== Prompt Cache =====
+        ConfigSchemaGroup {
+            id: s("promptCache"),
+            label: s("Prompt Cache"),
+            description: Some(s("提示词缓存控制（Anthropic ephemeral cache）")),
+            needs_restart: false,
+            sensitive: false,
+            fields: vec![
+                ConfigSchemaField {
+                    min: Some(0.0),
+                    default_value: Some(json!(300)),
+                    ..field("promptCacheTtlSeconds", "TTL（秒）", "number", false, "300=5m，3600=1h；改动重建 tracker")
+                },
+                ConfigSchemaField {
+                    default_value: Some(json!(true)),
+                    ..field("promptCacheAccountingEnabled", "启用计数", "boolean", false, "记录缓存命中率")
+                },
+            ],
+        },
+    ];
+
+    ConfigSchemaResponse { groups }
 }

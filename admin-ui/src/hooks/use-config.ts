@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { getConfig, getConfigRaw, updateConfig, validateConfig } from '@/api/config'
+import { getConfig, getConfigRaw, getConfigSchema, updateConfig, validateConfig } from '@/api/config'
 import type { ConfigJson } from '@/types/api'
 
 /** 拉取当前结构化 Config（不轮询，用户主动打开 Dialog 时触发） */
@@ -19,6 +19,16 @@ export function useConfigRaw(enabled: boolean = true) {
     queryFn: getConfigRaw,
     enabled,
     staleTime: 5000,
+  })
+}
+
+/** 拉取字段元数据（schema）。schema 不变，长 staleTime */
+export function useConfigSchema(enabled: boolean = true) {
+  return useQuery({
+    queryKey: ['config-schema'],
+    queryFn: getConfigSchema,
+    enabled,
+    staleTime: 60 * 60 * 1000, // 1h
   })
 }
 
