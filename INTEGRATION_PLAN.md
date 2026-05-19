@@ -364,7 +364,25 @@ git checkout work/integrate-feature
 
 ---
 
-## 十一、变更记录
+## 十一、阶段 4 已知留待项
+
+阶段 4 主体（4.1-4.6）+ 修复完成后，以下能力**已铺设基础设施但未接入业务路径**。
+何时接入由用户按需决定（每项接入都会增加 upstream 同步成本）：
+
+| 留待项 | 现状 | 接入需要做的 | 影响 |
+|---|---|---|---|
+| **affinity 用户亲和性** | `UserAffinityManager` 字段就位 | 给 `acquire_context` 加 `user_id: Option<&str>` 参数；handlers 提取 `Anthropic metadata.user_id` 传入 | 多用户场景下连续对话保持同凭据，提升 prompt cache 命中率 |
+| **fingerprint header 注入** | 每凭据生成 Fingerprint 字段 | endpoint trait 加 `inject_fingerprint(req)` hook 或 provider 出口处加 | 模拟 Kiro IDE 客户端环境特征，降低被检测风险 |
+| **start_background_refresh** | `background_refresher: Option<Arc<...>>` 字段为 None | main.rs 启动后调 `manager.start_background_refresh(interval)`；需要 `Arc<Self>` 构造重排 | 后台周期刷新过期 token，避免请求时阻塞刷新 |
+| **MeteringEvent 接入** | events/base.rs 已识别 | stream.rs 加 `Event::Metering(...)` match arm，把 credit 用量转发给客户端 | 客户端能看到实际计费 |
+| **ReasoningContentEvent 接入** | events/base.rs 已识别 | stream.rs 加 `Event::ReasoningContent(...)` match arm，转发为 Anthropic `thinking_delta` SSE | thinking 模型的服务端推理流可见 |
+| **cache_tracker caller** | PromptCacheRuntime / CacheTracker 全套就位（阶段 3.3） | stream.rs / handlers.rs / websearch.rs 接入 cache 拆分 | prompt cache 计费拆分（5m vs 1h）|
+| **truncation::detect_truncation** | 模块就位（阶段 1） | handlers tool_use 解析失败路径加调用 | 工具调用 JSON 截断时给客户端友好提示 |
+| **redact 日志脱敏** | 模块就位（阶段 1） | tracing 输出处加 redact::mask_email / mask_aws_account_id_in_arn | 隐私保护 |
+
+---
+
+## 十二、变更记录
 
 | 日期 | 阶段 | 摘要 |
 |---|---|---|
@@ -386,3 +404,4 @@ git checkout work/integrate-feature
 | 2026-05-19 | 4.4 | TokenManager 加 6 个 pub 方法（accessor + cooldown 管理）：`rate_limiter()` / `cooldown_manager()` accessor；`set_credential_cooldown()` / `set_credential_cooldown_with_duration()` / `clear_credential_cooldown()` 包装；`is_credential_available()` 综合判断（disabled+cooldown+rate_limit）。纯新增，caller 阶段 4.5/4.6 接入 |
 | 2026-05-19 | 4.5 | `select_next_credential` 的 filter 加 cooldown + rate_limit 跳过；`acquire_context` 的 current_hit 路径同步加同样过滤（current_id 在冷却中也回退选 next）。保留 upstream 的 priority/balanced 切换、opus 订阅检查、TooManyFailures 自愈。affinity 接入留 4.6（需要 user_id 上游参数） |
 | 2026-05-19 | 4.6 | provider.rs 在 MCP / API 两条路径的 429 处理处接入 `set_credential_cooldown(ctx.id, RateLimitExceeded)`。配合 4.5 的"选凭据时跳过 cooldown"，实现"凭据 429 → cooldown 退避 → 下次 acquire 自动换凭据 → cooldown 过期后自然恢复"闭环。408/5xx 维持原瞬态错误不冻处理。affinity / fingerprint header 注入 / start_background_refresh / metering 接入留待用户按需扩展（**阶段 4 主体完成**） |
+| 2026-05-19 | fix | 阶段 4 review 发现项修复：(A) `acquire_context` 拿到 ctx 后调 `rate_limiter.try_acquire(ctx.id)` 真正消耗 RPM 令牌——失败则置入 cooldown 并 continue；(B) 删除 `set_credential_cooldown` wrapper 的 tracing（cooldown.rs 内部已记录 credential_id/reason/duration/trigger_count，避免重复）；(C) 文档加"阶段 4 已知留待项"小节 |

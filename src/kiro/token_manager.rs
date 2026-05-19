@@ -882,6 +882,24 @@ impl MultiTokenManager {
             // 尝试获取/刷新 Token
             match self.try_ensure_token(id, &credentials).await {
                 Ok(ctx) => {
+                    // 阶段 4 fix: 真正消耗 rate_limiter 令牌
+                    //
+                    // select_next_credential 仅 check（不扣减），需要在这里 try_acquire
+                    // 才能真正实现 RPM 限制。失败时把凭据置入 cooldown 并继续选下一张。
+                    if let Err(retry_after) = self.rate_limiter.try_acquire(ctx.id) {
+                        self.cooldown_manager.set_cooldown_with_duration(
+                            ctx.id,
+                            CooldownReason::RateLimitExceeded,
+                            Some(retry_after),
+                        );
+                        tracing::warn!(
+                            credential_id = ctx.id,
+                            retry_after_ms = retry_after.as_millis() as u64,
+                            "凭据 RPM 已满，进入冷却"
+                        );
+                        attempt_count += 1;
+                        continue;
+                    }
                     return Ok(ctx);
                 }
                 Err(e) => {
@@ -1557,16 +1575,12 @@ impl MultiTokenManager {
     }
 
     /// 设置凭据冷却（按 reason 内置的默认时长）
+    ///
+    /// 注意：cooldown.rs 内部已 tracing::info 记录 credential_id / reason /
+    /// duration / trigger_count，本 wrapper 不再重复记录。
     #[allow(dead_code)]
     pub fn set_credential_cooldown(&self, id: u64, reason: CooldownReason) -> StdDuration {
-        let dur = self.cooldown_manager.set_cooldown(id, reason);
-        tracing::warn!(
-            credential_id = id,
-            reason = ?reason,
-            duration_ms = dur.as_millis() as u64,
-            "凭据进入冷却"
-        );
-        dur
+        self.cooldown_manager.set_cooldown(id, reason)
     }
 
     /// 设置凭据冷却（自定义时长，覆盖 reason 默认）
@@ -1579,12 +1593,6 @@ impl MultiTokenManager {
     ) {
         self.cooldown_manager
             .set_cooldown_with_duration(id, reason, Some(duration));
-        tracing::warn!(
-            credential_id = id,
-            reason = ?reason,
-            duration_ms = duration.as_millis() as u64,
-            "凭据进入冷却（自定义时长）"
-        );
     }
 
     /// 清除凭据冷却状态
