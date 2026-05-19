@@ -13,12 +13,18 @@ use tokio::sync::Mutex as TokioMutex;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration as StdDuration, Instant};
 
 use crate::http_client::{ProxyConfig, build_client};
+use crate::kiro::affinity::UserAffinityManager;
+use crate::kiro::background_refresh::BackgroundRefresher;
+use crate::kiro::cooldown::CooldownManager;
+use crate::kiro::fingerprint::Fingerprint;
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
+use crate::kiro::rate_limiter::{RateLimitConfig, RateLimiter};
 use crate::kiro::model::token_refresh::{
     IdcRefreshRequest, IdcRefreshResponse, RefreshRequest, RefreshResponse,
 };
@@ -414,6 +420,9 @@ struct CredentialEntry {
     success_count: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
     last_used_at: Option<String>,
+    /// 设备指纹（每个凭据独立，模拟真实 Kiro IDE 客户端环境特征）
+    #[allow(dead_code)] // 阶段 4.3 字段就位；阶段 4.6 接入 provider header
+    fingerprint: Fingerprint,
 }
 
 /// 禁用原因
@@ -526,6 +535,19 @@ pub struct MultiTokenManager {
     last_stats_save_at: Mutex<Option<Instant>>,
     /// 统计数据是否有未落盘更新
     stats_dirty: AtomicBool,
+    // === 阶段 4.3 凭据栈扩展（caller 阶段 4.4-4.6 接入）===
+    /// 用户亲和性管理器：user_id → credential_id 绑定
+    #[allow(dead_code)]
+    affinity: UserAffinityManager,
+    /// 凭据级速率限制器（RPM 控制）
+    #[allow(dead_code)]
+    rate_limiter: RateLimiter,
+    /// 冷却管理器（429 退避 / 临时禁用）
+    #[allow(dead_code)]
+    cooldown_manager: CooldownManager,
+    /// 后台 token 刷新器（启动后周期检查过期凭据）
+    #[allow(dead_code)]
+    background_refresher: Option<Arc<BackgroundRefresher>>,
 }
 
 /// 每个凭据最大 API 调用失败次数
@@ -586,6 +608,16 @@ impl MultiTokenManager {
                         Some(machine_id::generate_from_credentials(&cred, config_ref));
                     has_new_machine_ids = true;
                 }
+                // 阶段 4.3：为每个凭据生成独立设备指纹
+                let fingerprint_seed = cred
+                    .refresh_token
+                    .as_deref()
+                    .or(cred.kiro_api_key.as_deref())
+                    .or(cred.machine_id.as_deref())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("credential-{}", id));
+                let fingerprint = Fingerprint::generate_from_seed(&fingerprint_seed);
+
                 CredentialEntry {
                     id,
                     credentials: cred.clone(),
@@ -599,6 +631,7 @@ impl MultiTokenManager {
                     },
                     success_count: 0,
                     last_used_at: None,
+                    fingerprint,
                 }
             })
             .collect();
@@ -655,6 +688,11 @@ impl MultiTokenManager {
             load_balancing_mode: Mutex::new(load_balancing_mode),
             last_stats_save_at: Mutex::new(None),
             stats_dirty: AtomicBool::new(false),
+            // 阶段 4.3：凭据栈扩展字段就位（caller 阶段 4.4-4.6 接入）
+            affinity: UserAffinityManager::new(),
+            rate_limiter: RateLimiter::new(RateLimitConfig::default()),
+            cooldown_manager: CooldownManager::new(),
+            background_refresher: None,
         };
 
         // 如果有新分配的 ID 或新生成的 machineId，立即持久化到配置文件
@@ -1748,6 +1786,15 @@ impl MultiTokenManager {
 
         {
             let mut entries = self.entries.lock();
+            // 阶段 4.3：为新加凭据生成指纹（与 new() 中的种子策略一致）
+            let fingerprint_seed = validated_cred
+                .refresh_token
+                .as_deref()
+                .or(validated_cred.kiro_api_key.as_deref())
+                .or(validated_cred.machine_id.as_deref())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("credential-{}", new_id));
+            let fingerprint = Fingerprint::generate_from_seed(&fingerprint_seed);
             entries.push(CredentialEntry {
                 id: new_id,
                 credentials: validated_cred,
@@ -1757,6 +1804,7 @@ impl MultiTokenManager {
                 disabled_reason: None,
                 success_count: 0,
                 last_used_at: None,
+                fingerprint,
             });
         }
 
