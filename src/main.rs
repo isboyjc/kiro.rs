@@ -170,7 +170,10 @@ async fn main() {
         tls_backend: config.tls_backend,
     });
 
-    // 构建 Prompt Cache 运行时（阶段 3.3 模块就位；caller 接入待将来）
+    // 阶段 5.2：构建共享的 CompressionConfig 与 PromptCacheRuntime（admin/anthropic 共用）
+    let compression_config_shared = std::sync::Arc::new(parking_lot::RwLock::new(
+        config.compression.clone(),
+    ));
     let prompt_cache_runtime = std::sync::Arc::new(parking_lot::RwLock::new(
         anthropic::PromptCacheRuntime::new(
             config.prompt_cache_ttl_seconds,
@@ -183,8 +186,8 @@ async fn main() {
         &api_key,
         Some(kiro_provider),
         config.extract_thinking,
-        config.compression.clone(),
-        prompt_cache_runtime,
+        compression_config_shared.clone(),
+        prompt_cache_runtime.clone(),
     );
 
     // 构建 Admin API 路由（如果配置了非空的 admin_api_key）
@@ -200,8 +203,12 @@ async fn main() {
             tracing::warn!("admin_api_key 配置为空，Admin API 未启用");
             anthropic_app
         } else {
-            let admin_service =
-                admin::AdminService::new(token_manager.clone(), endpoint_names.clone());
+            let admin_service = admin::AdminService::new(
+                token_manager.clone(),
+                endpoint_names.clone(),
+                compression_config_shared.clone(),
+                prompt_cache_runtime.clone(),
+            );
             let admin_state = admin::AdminState::new(admin_key, admin_service);
             let admin_app = admin::create_admin_router(admin_state);
 

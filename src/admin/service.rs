@@ -5,16 +5,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::Utc;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 
+use crate::anthropic::PromptCacheRuntime;
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::token_manager::MultiTokenManager;
+use crate::model::config::CompressionConfig;
 
 use super::error::AdminServiceError;
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem,
-    CredentialsStatusResponse, LoadBalancingModeResponse, SetLoadBalancingModeRequest,
+    CredentialsStatusResponse, LoadBalancingModeResponse, PromptCacheConfigResponse,
+    SetLoadBalancingModeRequest, UpdatePromptCacheConfigRequest,
 };
 
 /// 余额缓存过期时间（秒），5 分钟
@@ -38,12 +41,18 @@ pub struct AdminService {
     cache_path: Option<PathBuf>,
     /// 已注册的端点名称集合（用于 add_credential 校验）
     known_endpoints: HashSet<String>,
+    /// 输入压缩与图片处理配置（阶段 5.2：与 anthropic AppState 共享的热加载源）
+    compression_config: Arc<RwLock<CompressionConfig>>,
+    /// Prompt Cache 运行时（阶段 5.2：与 anthropic AppState 共享）
+    prompt_cache_runtime: Arc<RwLock<PromptCacheRuntime>>,
 }
 
 impl AdminService {
     pub fn new(
         token_manager: Arc<MultiTokenManager>,
         known_endpoints: impl IntoIterator<Item = String>,
+        compression_config: Arc<RwLock<CompressionConfig>>,
+        prompt_cache_runtime: Arc<RwLock<PromptCacheRuntime>>,
     ) -> Self {
         let cache_path = token_manager
             .cache_dir()
@@ -56,7 +65,47 @@ impl AdminService {
             balance_cache: Mutex::new(balance_cache),
             cache_path,
             known_endpoints: known_endpoints.into_iter().collect(),
+            compression_config,
+            prompt_cache_runtime,
         }
+    }
+
+    // ============ 阶段 5.2: 全局配置热加载 ============
+
+    /// 获取当前 CompressionConfig 快照
+    pub fn get_compression_config(&self) -> CompressionConfig {
+        self.compression_config.read().clone()
+    }
+
+    /// 全量替换 CompressionConfig（PUT 语义）
+    pub fn update_compression_config(&self, new_config: CompressionConfig) {
+        *self.compression_config.write() = new_config;
+        tracing::info!("CompressionConfig 已通过 admin API 热更新");
+    }
+
+    /// 获取当前 Prompt Cache 配置
+    pub fn get_prompt_cache_config(&self) -> PromptCacheConfigResponse {
+        let rt = self.prompt_cache_runtime.read();
+        PromptCacheConfigResponse {
+            ttl_seconds: rt.ttl_seconds(),
+            accounting_enabled: rt.accounting_enabled(),
+        }
+    }
+
+    /// 全量替换 Prompt Cache 配置（TTL 变化会重建 cache_tracker）
+    pub fn update_prompt_cache_config(&self, req: UpdatePromptCacheConfigRequest) {
+        let UpdatePromptCacheConfigRequest {
+            ttl_seconds,
+            accounting_enabled,
+        } = req;
+        self.prompt_cache_runtime
+            .write()
+            .update(Some(ttl_seconds), Some(accounting_enabled));
+        tracing::info!(
+            ttl_seconds,
+            accounting_enabled,
+            "PromptCacheRuntime 已通过 admin API 热更新"
+        );
     }
 
     /// 获取所有凭据状态

@@ -257,3 +257,25 @@ impl AdminErrorResponse {
         Self::new("internal_error", message)
     }
 }
+
+// ============ 阶段 5.2: 全局配置热加载 ============
+
+/// Prompt Cache 配置响应（GET /config/prompt-cache）
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptCacheConfigResponse {
+    /// 当前 TTL（秒）
+    pub ttl_seconds: u64,
+    /// accounting 是否启用
+    pub accounting_enabled: bool,
+}
+
+/// Prompt Cache 配置更新请求（PUT /config/prompt-cache）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdatePromptCacheConfigRequest {
+    /// 新 TTL（秒）；TTL 变化会重建 cache_tracker
+    pub ttl_seconds: u64,
+    /// 新 accounting 开关
+    pub accounting_enabled: bool,
+}

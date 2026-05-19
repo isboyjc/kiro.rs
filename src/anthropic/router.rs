@@ -43,11 +43,11 @@ pub fn create_router_with_provider(
     api_key: impl Into<String>,
     kiro_provider: Option<KiroProvider>,
     extract_thinking: bool,
-    compression_config: CompressionConfig,
+    compression_config: Arc<RwLock<CompressionConfig>>,
     prompt_cache_runtime: Arc<RwLock<PromptCacheRuntime>>,
 ) -> Router {
     let mut state = AppState::new(api_key, extract_thinking)
-        .with_compression_config(compression_config)
+        .with_compression_config_shared(compression_config)
         .with_prompt_cache_runtime(prompt_cache_runtime);
     if let Some(provider) = kiro_provider {
         state = state.with_kiro_provider(provider);

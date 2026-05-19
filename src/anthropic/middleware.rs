@@ -56,8 +56,17 @@ impl PromptCacheRuntime {
         }
     }
 
+    /// 当前 TTL（秒）。阶段 5.2 admin GET 端点用
+    pub fn ttl_seconds(&self) -> u64 {
+        self.ttl_seconds
+    }
+
+    /// 当前 accounting 开关。阶段 5.2 admin GET 端点用
+    pub fn accounting_enabled(&self) -> bool {
+        self.accounting_enabled
+    }
+
     /// 热加载：调整 TTL 或 accounting 开关。TTL 变化会重建 tracker。
-    #[allow(dead_code)] // 阶段 5 admin 热加载会调用
     pub fn update(&mut self, ttl_seconds: Option<u64>, accounting_enabled: Option<bool>) {
         if let Some(value) = accounting_enabled {
             self.accounting_enabled = value;
@@ -114,15 +123,8 @@ impl AppState {
         self
     }
 
-    /// 设置压缩与图片处理配置（owned 版本，内部包成 RwLock）
-    pub fn with_compression_config(mut self, config: CompressionConfig) -> Self {
-        self.compression_config = Arc::new(RwLock::new(config));
-        self
-    }
-
     /// 设置压缩与图片处理配置（接收外部共享的 RwLock，便于 admin 与
     /// anthropic 路由共用同一份热更新源）
-    #[allow(dead_code)] // 阶段 5.2 admin handlers 接入时使用
     pub fn with_compression_config_shared(
         mut self,
         config: Arc<RwLock<CompressionConfig>>,

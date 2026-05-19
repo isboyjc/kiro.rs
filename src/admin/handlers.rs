@@ -6,11 +6,13 @@ use axum::{
     response::IntoResponse,
 };
 
+use crate::model::config::CompressionConfig;
+
 use super::{
     middleware::AdminState,
     types::{
         AddCredentialRequest, SetDisabledRequest, SetLoadBalancingModeRequest, SetPriorityRequest,
-        SuccessResponse,
+        SuccessResponse, UpdatePromptCacheConfigRequest,
     },
 };
 
@@ -139,4 +141,38 @@ pub async fn set_load_balancing_mode(
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
+}
+
+// ============ 阶段 5.2: 全局配置热加载 ============
+
+/// GET /api/admin/config/compression
+/// 获取当前 CompressionConfig
+pub async fn get_compression_config(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_compression_config())
+}
+
+/// PUT /api/admin/config/compression
+/// 全量替换 CompressionConfig
+pub async fn update_compression_config(
+    State(state): State<AdminState>,
+    Json(new_config): Json<CompressionConfig>,
+) -> impl IntoResponse {
+    state.service.update_compression_config(new_config);
+    Json(SuccessResponse::new("CompressionConfig 已热更新"))
+}
+
+/// GET /api/admin/config/prompt-cache
+/// 获取当前 Prompt Cache 配置
+pub async fn get_prompt_cache_config(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_prompt_cache_config())
+}
+
+/// PUT /api/admin/config/prompt-cache
+/// 全量替换 Prompt Cache 配置（TTL 变化会重建 cache_tracker）
+pub async fn update_prompt_cache_config(
+    State(state): State<AdminState>,
+    Json(req): Json<UpdatePromptCacheConfigRequest>,
+) -> impl IntoResponse {
+    state.service.update_prompt_cache_config(req);
+    Json(SuccessResponse::new("PromptCacheRuntime 已热更新"))
 }

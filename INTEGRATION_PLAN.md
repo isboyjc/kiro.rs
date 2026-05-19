@@ -379,3 +379,4 @@ git checkout work/integrate-feature
 | 2026-05-19 | 6.2 | Cargo.toml 加 `sensitive-logs = []` feature；main.rs 主凭证日志 / handlers.rs 两处 Kiro request body 日志加 `#[cfg(feature = "sensitive-logs")]` 守卫，默认输出摘要字段，启用后输出完整内容。两种 feature 配置都通过编译与测试 |
 | 2026-05-19 | fix | main.rs:224 启动日志（info 级别打印 API Key 前 50%）补 sensitive-logs 守卫——默认仅输出长度，启用后保留原行为 |
 | 2026-05-19 | 5.1 | `AppState.compression_config` 从 `Arc<C>` 升级为 `Arc<RwLock<C>>`；handlers reader 改 `read().clone()` 拿快照；新增 `with_compression_config_shared()` 接受外部 RwLock（阶段 5.2 用） |
+| 2026-05-19 | 5.2 | Admin 后端热加载端点：`GET/PUT /api/admin/config/compression`、`GET/PUT /api/admin/config/prompt-cache`；AdminService 持有同一份 `Arc<RwLock<>>` 与 anthropic AppState 共享；PromptCacheRuntime 暴露 ttl_seconds/accounting_enabled getter。前端 UI 留待阶段 5.3 |

@@ -8,8 +8,10 @@ use axum::{
 use super::{
     handlers::{
         add_credential, delete_credential, force_refresh_token, get_all_credentials,
-        get_credential_balance, get_load_balancing_mode, reset_failure_count,
-        set_credential_disabled, set_credential_priority, set_load_balancing_mode,
+        get_compression_config, get_credential_balance, get_load_balancing_mode,
+        get_prompt_cache_config, reset_failure_count, set_credential_disabled,
+        set_credential_priority, set_load_balancing_mode, update_compression_config,
+        update_prompt_cache_config,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -47,6 +49,15 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route(
             "/config/load-balancing",
             get(get_load_balancing_mode).put(set_load_balancing_mode),
+        )
+        // 阶段 5.2 全局配置热加载端点
+        .route(
+            "/config/compression",
+            get(get_compression_config).put(update_compression_config),
+        )
+        .route(
+            "/config/prompt-cache",
+            get(get_prompt_cache_config).put(update_prompt_cache_config),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),
