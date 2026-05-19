@@ -243,3 +243,54 @@ pub(crate) fn estimate_output_tokens(content: &[serde_json::Value]) -> i32 {
 
     total.max(1)
 }
+
+// === 阶段 3.3 cache_tracker 依赖 ===
+
+/// 每个工具定义的固定 token 估算（与 Anthropic 服务端估算量级一致）
+const TOKENS_PER_TOOL: u64 = 150;
+
+fn count_serialized_value_tokens(value: &serde_json::Value) -> u64 {
+    let json = serde_json::to_string(value).unwrap_or_default();
+    count_tokens(&json)
+}
+
+fn estimate_content_block_tokens(obj: &serde_json::Map<String, serde_json::Value>) -> u64 {
+    if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
+        return count_tokens(text);
+    }
+
+    if let Some(thinking) = obj.get("thinking").and_then(|v| v.as_str()) {
+        return count_tokens(thinking);
+    }
+
+    if let Some(input) = obj.get("input") {
+        return count_serialized_value_tokens(input);
+    }
+
+    if let Some(content) = obj.get("content") {
+        return count_message_content_tokens(content);
+    }
+
+    0
+}
+
+/// 计算系统消息的 tokens
+pub(crate) fn count_system_message_tokens(message: &SystemMessage) -> u64 {
+    count_tokens(&message.text)
+}
+
+/// 计算工具定义的 tokens
+pub(crate) fn count_tool_definition_tokens(_tool: &Tool) -> u64 {
+    TOKENS_PER_TOOL
+}
+
+/// 计算消息内容的 tokens
+pub(crate) fn count_message_content_tokens(value: &serde_json::Value) -> u64 {
+    match value {
+        serde_json::Value::Null => 0,
+        serde_json::Value::String(s) => count_tokens(s),
+        serde_json::Value::Array(arr) => arr.iter().map(count_message_content_tokens).sum(),
+        serde_json::Value::Object(obj) => estimate_content_block_tokens(obj),
+        _ => 0,
+    }
+}

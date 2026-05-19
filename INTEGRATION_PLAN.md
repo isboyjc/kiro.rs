@@ -373,3 +373,4 @@ git checkout work/integrate-feature
 | 2026-05-19 | 2 | 移植 CLI endpoint；升级 trait 签名为 `Result<String>`；新增 `UsageRequestParts`；`ToolSpecification` 字段顺序对齐 kiro-cli 2.3.0 wire |
 | 2026-05-19 | 3.1 | 移植 `src/image.rs`；加 `CompressionConfig` 完整 schema（压缩字段为 3.2 预留）；converter.rs 当前消息图片块接入单图缩放；新增 `image` / `base64` 依赖 |
 | 2026-05-19 | 3.2 | 移植 `src/anthropic/compressor.rs`（四层压缩管道）；AppState 加 `Arc<CompressionConfig>`；`convert_request` 签名加 `&CompressionConfig` 并在末尾接入 `compressor::compress`；`convert_tools` 后接入 `tool_compression::compress_tools_if_needed`；3.1 的图片 hook 改为接收 config（用户配置真正生效） |
+| 2026-05-19 | 3.3 | 移植 `cache_tracker.rs` 与 `PromptCacheRuntime` 基础设施；types.rs 加 `CacheControl` 并扩展 SystemMessage/Tool 的 cache_control 字段；token.rs 加 3 个 count_* 计数函数；AppState 加 `Arc<RwLock<PromptCacheRuntime>>`；Config 加 `prompt_cache_ttl_seconds` / `prompt_cache_accounting_enabled`。**模块就位、caller 未接入**——stream/handlers/websearch 的 cache 拆分需重写 upstream 主体，留待用户主动决策 |

@@ -160,12 +160,21 @@ async fn main() {
         tls_backend: config.tls_backend,
     });
 
+    // 构建 Prompt Cache 运行时（阶段 3.3 模块就位；caller 接入待将来）
+    let prompt_cache_runtime = std::sync::Arc::new(parking_lot::RwLock::new(
+        anthropic::PromptCacheRuntime::new(
+            config.prompt_cache_ttl_seconds,
+            config.prompt_cache_accounting_enabled,
+        ),
+    ));
+
     // 构建 Anthropic API 路由（profile_arn 由 provider 层根据实际凭据动态注入）
     let anthropic_app = anthropic::create_router_with_provider(
         &api_key,
         Some(kiro_provider),
         config.extract_thinking,
         config.compression.clone(),
+        prompt_cache_runtime,
     );
 
     // 构建 Admin API 路由（如果配置了非空的 admin_api_key）

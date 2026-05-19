@@ -22,6 +22,7 @@
 //! axum::serve(listener, app).await?;
 //! ```
 
+mod cache_tracker;
 mod compressor;
 mod converter;
 mod handlers;
@@ -32,5 +33,7 @@ mod tool_compression;
 mod truncation;
 pub mod types;
 mod websearch;
+
+pub use middleware::PromptCacheRuntime;
 
 pub use router::create_router_with_provider;

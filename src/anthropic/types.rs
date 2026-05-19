@@ -3,6 +3,18 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// 缓存控制配置
+///
+/// 阶段 3.3 引入：用于 prompt cache 计费的"标记"块。当前 upstream
+/// 只接收并保留字段，不主动消费——cache_tracker 模块负责按此字段切片计算。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CacheControl {
+    #[serde(rename = "type")]
+    pub cache_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+}
+
 // === 错误响应 ===
 
 /// API 错误响应
@@ -150,7 +162,9 @@ where
             E: serde::de::Error,
         {
             Ok(Some(vec![SystemMessage {
+                block_type: None,
                 text: value.to_string(),
+                cache_control: None,
             }]))
         }
 
@@ -198,7 +212,13 @@ pub struct Message {
 /// 系统消息
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SystemMessage {
+    /// 块类型（默认为 None；Anthropic 客户端通常发 `"type": "text"`）
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub block_type: Option<String>,
     pub text: String,
+    /// 缓存控制（cache_tracker 用此字段决定 5m/1h ephemeral 分类）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 /// 工具定义
@@ -223,6 +243,9 @@ pub struct Tool {
     /// 最大使用次数（仅 WebSearch 工具）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_uses: Option<i32>,
+    /// 缓存控制（cache_tracker 用此字段决定工具定义是否参与 cache 切片）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 /// 内容块

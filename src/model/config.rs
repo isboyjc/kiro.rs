@@ -116,6 +116,17 @@ pub struct Config {
     #[serde(default)]
     pub compression: CompressionConfig,
 
+    /// Prompt Cache 追踪 TTL（秒），默认 300（5 分钟）
+    ///
+    /// 阶段 3.3 引入。cache_tracker 模块已就位但 caller 尚未接入；
+    /// 阶段 5 admin 热加载或用户主动接入 cache 计费拆分时生效。
+    #[serde(default = "default_prompt_cache_ttl_seconds")]
+    pub prompt_cache_ttl_seconds: u64,
+
+    /// 是否启用 Prompt Cache 计费追踪，默认 true
+    #[serde(default = "default_true")]
+    pub prompt_cache_accounting_enabled: bool,
+
     /// 配置文件路径（运行时元数据，不写入 JSON）
     #[serde(skip)]
     config_path: Option<PathBuf>,
@@ -192,9 +203,15 @@ impl Default for Config {
             default_endpoint: default_endpoint(),
             endpoints: HashMap::new(),
             compression: CompressionConfig::default(),
+            prompt_cache_ttl_seconds: default_prompt_cache_ttl_seconds(),
+            prompt_cache_accounting_enabled: true,
             config_path: None,
         }
     }
+}
+
+fn default_prompt_cache_ttl_seconds() -> u64 {
+    300
 }
 
 /// 输入压缩与图片处理配置（从 feature/master 移植）

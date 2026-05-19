@@ -1,16 +1,20 @@
 //! Anthropic API 路由配置
 
+use std::sync::Arc;
+
 use axum::{
     Router,
     extract::DefaultBodyLimit,
     middleware,
     routing::{get, post},
 };
+use parking_lot::RwLock;
 
 use crate::kiro::provider::KiroProvider;
 use crate::model::config::CompressionConfig;
 
 use super::{
+    PromptCacheRuntime,
     handlers::{count_tokens, get_models, post_messages, post_messages_cc},
     middleware::{AppState, auth_middleware, cors_layer},
 };
@@ -40,9 +44,11 @@ pub fn create_router_with_provider(
     kiro_provider: Option<KiroProvider>,
     extract_thinking: bool,
     compression_config: CompressionConfig,
+    prompt_cache_runtime: Arc<RwLock<PromptCacheRuntime>>,
 ) -> Router {
     let mut state = AppState::new(api_key, extract_thinking)
-        .with_compression_config(compression_config);
+        .with_compression_config(compression_config)
+        .with_prompt_cache_runtime(prompt_cache_runtime);
     if let Some(provider) = kiro_provider {
         state = state.with_kiro_provider(provider);
     }
