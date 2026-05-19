@@ -133,6 +133,7 @@ impl KiroProvider {
         };
 
         let entry = crate::common::log_ring::LogEntry {
+            seq: 0, // LogRing::push 会覆盖
             timestamp: chrono::Utc::now().timestamp_millis(),
             level: level.to_string(),
             kind: crate::common::log_ring::LogKind::ModelCall,

@@ -864,6 +864,7 @@ impl AdminService {
     }
 
     /// 拿一份 Arc<LogRing> 给 provider 用于追加 ModelCall 记录
+    #[allow(dead_code)]
     pub fn log_ring(&self) -> Arc<LogRing> {
         self.log_ring.clone()
     }

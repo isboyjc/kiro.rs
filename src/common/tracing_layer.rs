@@ -39,6 +39,7 @@ where
         event.record(&mut visitor);
 
         let entry = LogEntry {
+            seq: 0, // LogRing::push 会覆盖
             timestamp: Utc::now().timestamp_millis(),
             level: level_str,
             kind: LogKind::Generic,

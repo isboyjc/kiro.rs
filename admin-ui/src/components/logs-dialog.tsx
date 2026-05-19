@@ -1,17 +1,20 @@
 import { useMemo, useState } from 'react'
 import { toast } from 'sonner'
 import {
+  Activity,
   AlertCircle,
   CheckCircle2,
   ChevronDown,
-  ChevronRight,
+  Copy,
   FileText,
   Loader2,
   Pause,
   Play,
-  Radio,
+  RefreshCw,
+  Search,
   Trash2,
   XCircle,
+  Zap,
 } from 'lucide-react'
 import {
   Dialog,
@@ -47,21 +50,34 @@ function formatTime(ts: number): string {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, '0')}`
 }
 
-function levelColor(level: string): string {
+function levelClasses(level: string): { text: string; bar: string; bg: string } {
   const u = level.toUpperCase()
-  if (u === 'ERROR') return 'text-red-500'
-  if (u === 'WARN') return 'text-amber-500'
-  return 'text-blue-500'
+  if (u === 'ERROR') {
+    return { text: 'text-red-600 dark:text-red-400', bar: 'bg-red-500', bg: 'bg-red-50/40 dark:bg-red-950/10' }
+  }
+  if (u === 'WARN') {
+    return { text: 'text-amber-600 dark:text-amber-400', bar: 'bg-amber-500', bg: '' }
+  }
+  return { text: 'text-blue-600 dark:text-blue-400', bar: 'bg-blue-400/60', bg: '' }
 }
 
-function statusBadge(status: number): { color: string; icon: React.ReactNode; label: string } {
+function statusInfo(status: number): { color: string; icon: React.ReactNode; label: string; bar: string } {
   if (status === 0) {
-    return { color: 'text-red-500', icon: <XCircle className="h-3 w-3" />, label: 'NET' }
+    return { color: 'text-red-600', icon: <XCircle className="h-3 w-3" />, label: 'NET', bar: 'bg-red-500' }
   }
   if (status >= 400) {
-    return { color: 'text-red-500', icon: <XCircle className="h-3 w-3" />, label: String(status) }
+    return { color: 'text-red-600', icon: <XCircle className="h-3 w-3" />, label: String(status), bar: 'bg-red-500' }
   }
-  return { color: 'text-green-600', icon: <CheckCircle2 className="h-3 w-3" />, label: String(status) }
+  return { color: 'text-green-600', icon: <CheckCircle2 className="h-3 w-3" />, label: String(status), bar: 'bg-green-500' }
+}
+
+function copyToClipboard(text: string) {
+  try {
+    navigator.clipboard.writeText(text)
+    toast.success('已复制到剪贴板')
+  } catch {
+    toast.error('复制失败')
+  }
 }
 
 export function LogsDialog({ open, onOpenChange }: LogsDialogProps) {
@@ -95,19 +111,22 @@ export function LogsDialog({ open, onOpenChange }: LogsDialogProps) {
     }
   }
 
-  const toggleExpand = (timestamp: number) => {
+  const toggleExpand = (seq: number) => {
     setExpanded((prev) => {
       const next = new Set(prev)
-      if (next.has(timestamp)) {
-        next.delete(timestamp)
+      if (next.has(seq)) {
+        next.delete(seq)
       } else {
-        next.add(timestamp)
+        next.add(seq)
       }
       return next
     })
   }
 
   const stats = data?.stats
+  const successRate = stats && stats.total > 0 ? (stats.success / stats.total) * 100 : null
+  const hasActiveFilter = kindFilter !== 'all' || levelFilter !== 'all' || searchTerm.trim() !== '' || onlyFailed
+  const filteredCount = data?.entries.length ?? 0
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -117,100 +136,91 @@ export function LogsDialog({ open, onOpenChange }: LogsDialogProps) {
             <div className="h-7 w-7 rounded-md bg-primary/10 flex items-center justify-center">
               <FileText className="h-4 w-4 text-primary" />
             </div>
-            日志查看
+            <span>日志查看</span>
             {autoRefresh && (
               <span className="ml-1 inline-flex items-center gap-1 text-xs font-normal text-green-600">
-                <Radio className="h-3 w-3 animate-pulse" /> 实时
+                <span className="h-1.5 w-1.5 rounded-full bg-green-500 animate-pulse" />
+                实时
               </span>
             )}
+            <span className="flex-1" />
+            <span className="text-xs font-normal text-muted-foreground">
+              {hasActiveFilter && (
+                <span className="font-mono">{filteredCount}/</span>
+              )}
+              <span className="font-mono">{data?.totalBuffered ?? 0}</span>
+              <span className="text-muted-foreground/60"> / {data?.capacity ?? 0}</span>
+            </span>
           </DialogTitle>
           <DialogDescription className="text-xs mt-1">
-            内存环形缓冲，重启丢失。已缓存{' '}
-            <span className="font-mono">{data?.totalBuffered ?? 0}</span> / {data?.capacity ?? 0} 条
+            内存环形缓冲，重启丢失
           </DialogDescription>
         </DialogHeader>
 
-        {/* 统计条 (最近 5 分钟 ModelCall) */}
-        {stats && stats.total > 0 && (
-          <div className="flex items-center gap-3 px-3 py-2 rounded-md bg-muted/30 text-xs">
-            <span className="text-muted-foreground">最近 5 分钟模型调用:</span>
-            <span>
-              共 <span className="font-medium text-foreground">{stats.total}</span> 次
-            </span>
-            <span className="text-green-600">
-              ✓ {stats.success}
-            </span>
-            <span className="text-red-500">
-              ✗ {stats.failed}
-            </span>
-            <span className="text-muted-foreground">·</span>
-            <span>
-              成功率{' '}
-              <span className="font-medium text-foreground">
-                {stats.total > 0 ? ((stats.success / stats.total) * 100).toFixed(1) : '0'}%
-              </span>
-            </span>
-            <span className="text-muted-foreground">·</span>
-            <span>
-              平均 <span className="font-medium text-foreground">{stats.avgMs}</span>ms
-            </span>
-            <span className="text-muted-foreground">·</span>
-            <span>
-              P95 <span className="font-medium text-foreground">{stats.p95Ms}</span>ms
-            </span>
+        {/* 统计条 - 最近 5 分钟 ModelCall */}
+        {stats && (
+          <div className="grid grid-cols-5 gap-2 text-xs">
+            <StatCard
+              icon={<Activity className="h-3 w-3" />}
+              label="调用"
+              value={stats.total}
+              hint="5 分钟"
+            />
+            <StatCard
+              icon={<CheckCircle2 className="h-3 w-3" />}
+              label="成功"
+              value={stats.success}
+              tone="success"
+            />
+            <StatCard
+              icon={<XCircle className="h-3 w-3" />}
+              label="失败"
+              value={stats.failed}
+              tone={stats.failed > 0 ? 'danger' : 'default'}
+            />
+            <StatCard
+              icon={<Zap className="h-3 w-3" />}
+              label="成功率"
+              value={successRate != null ? `${successRate.toFixed(1)}%` : '—'}
+              tone={successRate != null && successRate < 90 ? 'warn' : 'success'}
+            />
+            <StatCard
+              icon={<RefreshCw className="h-3 w-3" />}
+              label="P95"
+              value={stats.total > 0 ? `${stats.p95Ms}ms` : '—'}
+              hint={stats.total > 0 ? `平均 ${stats.avgMs}ms` : undefined}
+            />
           </div>
         )}
 
         {/* 工具栏 */}
         <div className="space-y-2">
           <div className="flex items-center gap-2 flex-wrap">
-            {/* 类型分段 */}
-            <div className="flex items-center gap-0.5 border rounded-md p-0.5 bg-muted/30">
-              {([
-                ['all', '全部'],
-                ['generic', '系统'],
-                ['model_call', '模型调用'],
-              ] as const).map(([k, label]) => (
-                <button
-                  key={k}
-                  onClick={() => setKindFilter(k)}
-                  className={`h-7 px-2 text-xs rounded transition ${
-                    kindFilter === k
-                      ? 'bg-background shadow-sm text-foreground font-medium'
-                      : 'text-muted-foreground hover:text-foreground'
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-
-            {/* 等级分段 */}
-            <div className="flex items-center gap-0.5 border rounded-md p-0.5 bg-muted/30">
-              {LEVEL_OPTIONS.map(({ value, label }) => (
-                <button
-                  key={value}
-                  onClick={() => setLevelFilter(value)}
-                  className={`h-7 px-2 text-xs rounded transition ${
-                    levelFilter === value
-                      ? 'bg-background shadow-sm text-foreground font-medium'
-                      : 'text-muted-foreground hover:text-foreground'
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-
-            <input
-              type="text"
-              placeholder="🔍 搜索消息 / target / 字段"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="flex-1 min-w-[200px] h-8 px-2 text-xs border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary/30"
+            <FilterSegment
+              options={[
+                { value: 'all', label: '全部' },
+                { value: 'generic', label: '系统' },
+                { value: 'model_call', label: '模型调用' },
+              ]}
+              value={kindFilter}
+              onChange={(v) => setKindFilter(v as KindFilter)}
             />
-
-            <label className="inline-flex items-center gap-1 text-xs text-muted-foreground cursor-pointer select-none">
+            <FilterSegment
+              options={LEVEL_OPTIONS}
+              value={levelFilter}
+              onChange={setLevelFilter}
+            />
+            <div className="relative flex-1 min-w-[200px]">
+              <Search className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <input
+                type="text"
+                placeholder="搜索消息 / target / 字段"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full h-8 pl-8 pr-2 text-xs border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary/30"
+              />
+            </div>
+            <label className="inline-flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none px-2 h-8 rounded-md border bg-muted/30 hover:bg-muted/50">
               <Switch
                 checked={onlyFailed}
                 onCheckedChange={setOnlyFailed}
@@ -220,7 +230,7 @@ export function LogsDialog({ open, onOpenChange }: LogsDialogProps) {
             </label>
           </div>
 
-          <div className="flex items-center gap-2 text-xs">
+          <div className="flex items-center gap-1 text-xs">
             <Button
               size="sm"
               variant="ghost"
@@ -238,9 +248,19 @@ export function LogsDialog({ open, onOpenChange }: LogsDialogProps) {
               onClick={() => refetch()}
               disabled={isLoading}
             >
-              {isLoading ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : null}
+              <RefreshCw className={`h-3 w-3 mr-1 ${isLoading ? 'animate-spin' : ''}`} />
               立即刷新
             </Button>
+            {expanded.size > 0 && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 text-xs"
+                onClick={() => setExpanded(new Set())}
+              >
+                收起全部 ({expanded.size})
+              </Button>
+            )}
             <div className="flex-1" />
             <Button
               size="sm"
@@ -255,29 +275,51 @@ export function LogsDialog({ open, onOpenChange }: LogsDialogProps) {
         </div>
 
         {/* 日志列表 */}
-        <div className="border rounded-md max-h-[500px] overflow-y-auto bg-background">
+        <div className="border rounded-md max-h-[480px] overflow-y-auto bg-background">
           {error ? (
-            <div className="p-6 text-center text-sm text-red-500">
-              <AlertCircle className="h-5 w-5 mx-auto mb-2" />
+            <div className="p-8 text-center text-sm text-red-500">
+              <AlertCircle className="h-6 w-6 mx-auto mb-2" />
               加载失败：{extractErrorMessage(error)}
             </div>
           ) : isLoading && !data ? (
-            <div className="p-6 text-center text-sm text-muted-foreground">
-              <Loader2 className="h-5 w-5 mx-auto mb-2 animate-spin" />
+            <div className="p-8 text-center text-sm text-muted-foreground">
+              <Loader2 className="h-6 w-6 mx-auto mb-2 animate-spin" />
               加载中...
             </div>
           ) : !data?.entries.length ? (
-            <div className="p-6 text-center text-sm text-muted-foreground">
-              没有匹配当前过滤条件的日志
+            <div className="p-8 text-center text-sm text-muted-foreground">
+              <FileText className="h-6 w-6 mx-auto mb-2 opacity-30" />
+              {hasActiveFilter ? (
+                <>
+                  没有匹配当前过滤条件的日志
+                  <div className="mt-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs"
+                      onClick={() => {
+                        setKindFilter('all')
+                        setLevelFilter('all')
+                        setSearchTerm('')
+                        setOnlyFailed(false)
+                      }}
+                    >
+                      清除过滤
+                    </Button>
+                  </div>
+                </>
+              ) : (
+                <>暂无日志</>
+              )}
             </div>
           ) : (
-            <div className="divide-y">
+            <div className="divide-y divide-border/50">
               {data.entries.map((entry) => (
                 <LogRow
-                  key={`${entry.timestamp}-${entry.target}-${entry.message.slice(0, 20)}`}
+                  key={entry.seq}
                   entry={entry}
-                  expanded={expanded.has(entry.timestamp)}
-                  onToggle={() => toggleExpand(entry.timestamp)}
+                  expanded={expanded.has(entry.seq)}
+                  onToggle={() => toggleExpand(entry.seq)}
                 />
               ))}
             </div>
@@ -285,6 +327,67 @@ export function LogsDialog({ open, onOpenChange }: LogsDialogProps) {
         </div>
       </DialogContent>
     </Dialog>
+  )
+}
+
+function StatCard({
+  icon,
+  label,
+  value,
+  hint,
+  tone = 'default',
+}: {
+  icon: React.ReactNode
+  label: string
+  value: number | string
+  hint?: string
+  tone?: 'default' | 'success' | 'warn' | 'danger'
+}) {
+  const toneClass =
+    tone === 'success'
+      ? 'text-green-600 dark:text-green-400'
+      : tone === 'warn'
+        ? 'text-amber-600 dark:text-amber-400'
+        : tone === 'danger'
+          ? 'text-red-600 dark:text-red-400'
+          : 'text-foreground'
+  return (
+    <div className="px-3 py-2 rounded-md border bg-card">
+      <div className="text-[10px] text-muted-foreground flex items-center gap-1 uppercase tracking-wide">
+        {icon}
+        {label}
+      </div>
+      <div className={`text-base font-semibold mt-0.5 ${toneClass}`}>{value}</div>
+      {hint && <div className="text-[10px] text-muted-foreground/80">{hint}</div>}
+    </div>
+  )
+}
+
+function FilterSegment({
+  options,
+  value,
+  onChange,
+}: {
+  options: { value: string; label: string }[]
+  value: string
+  onChange: (v: string) => void
+}) {
+  return (
+    <div className="inline-flex items-center gap-0.5 border rounded-md p-0.5 bg-muted/30">
+      {options.map(({ value: v, label }) => (
+        <button
+          key={v}
+          onClick={() => onChange(v)}
+          className={`h-7 px-2.5 text-xs rounded transition ${
+            value === v
+              ? 'bg-background shadow-sm text-foreground font-medium'
+              : 'text-muted-foreground hover:text-foreground'
+          }`}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
   )
 }
 
@@ -299,98 +402,177 @@ function LogRow({
 }) {
   const isModelCall = entry.kind === 'model_call'
   const mc = entry.modelCall
-  const statusInfo = mc ? statusBadge(mc.status) : null
+  const lc = levelClasses(entry.level)
+  const sInfo = mc ? statusInfo(mc.status) : null
   const isFailed = mc ? mc.status >= 400 || mc.status === 0 : entry.level.toUpperCase() === 'ERROR'
+  const leftBar = isModelCall && sInfo ? sInfo.bar : lc.bar
 
   return (
-    <div
-      className={`px-2 py-1.5 hover:bg-muted/30 transition text-xs ${isFailed ? 'bg-red-50/40 dark:bg-red-950/10' : ''}`}
-    >
-      <div className="flex items-start gap-2 cursor-pointer" onClick={onToggle}>
-        <button className="h-4 w-4 inline-flex items-center justify-center text-muted-foreground shrink-0 mt-0.5">
-          {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-        </button>
-        <span className="font-mono text-muted-foreground shrink-0 mt-0.5">{formatTime(entry.timestamp)}</span>
-        <span className={`font-semibold uppercase shrink-0 mt-0.5 w-12 ${levelColor(entry.level)}`}>
-          {entry.level}
+    <div className={`relative group transition-colors hover:bg-muted/30 ${isFailed ? lc.bg : ''}`}>
+      {/* 左侧色条 */}
+      <div className={`absolute left-0 top-0 bottom-0 w-0.5 ${leftBar}`} />
+
+      <div className="flex items-center gap-2 px-3 py-1.5 cursor-pointer" onClick={onToggle}>
+        <ChevronDown
+          className={`h-3 w-3 text-muted-foreground shrink-0 transition-transform ${expanded ? '' : '-rotate-90'}`}
+        />
+
+        <span className="font-mono text-[11px] text-muted-foreground shrink-0 w-20">
+          {formatTime(entry.timestamp)}
         </span>
-        {isModelCall && statusInfo ? (
-          <span className={`shrink-0 inline-flex items-center gap-0.5 ${statusInfo.color}`}>
-            {statusInfo.icon}
-            <span className="font-mono">{statusInfo.label}</span>
+
+        {/* Level / Status 紧凑 chip */}
+        {isModelCall && sInfo ? (
+          <span className={`shrink-0 inline-flex items-center gap-0.5 ${sInfo.color}`}>
+            {sInfo.icon}
+            <span className="font-mono text-[11px]">{sInfo.label}</span>
           </span>
         ) : (
-          <span className="shrink-0 text-muted-foreground/70 font-mono truncate max-w-[140px]">
-            {entry.target.replace(/^kiro_rs::/, '')}
+          <span className={`shrink-0 inline-flex items-center text-[10px] font-bold uppercase tracking-wide w-12 ${lc.text}`}>
+            {entry.level}
           </span>
         )}
-        <span className="flex-1 truncate">
-          {entry.message}
-          {isModelCall && mc?.retryAttempt ? (
-            <span className="ml-2 text-amber-600">↻{mc.retryAttempt}</span>
-          ) : null}
+
+        {/* Source */}
+        <span className="shrink-0 text-[11px] text-muted-foreground/80 font-mono truncate max-w-[150px]" title={isModelCall ? `${mc?.endpoint} · ${mc?.apiType}` : entry.target}>
+          {isModelCall ? (
+            <>
+              {mc?.model || mc?.endpoint || '调用'}
+            </>
+          ) : (
+            entry.target.replace(/^kiro_rs::/, '')
+          )}
         </span>
+
+        {/* Message */}
+        <span className="flex-1 text-xs truncate">
+          {isModelCall ? (
+            <>
+              <span className="font-medium">#{mc?.credentialId}</span>
+              <span className="text-muted-foreground"> · {mc?.durationMs}ms</span>
+              {mc && mc.retryAttempt > 0 && (
+                <span className="ml-1.5 text-amber-600 font-medium">↻ 重试 {mc.retryAttempt}</span>
+              )}
+              {mc && mc.isStream && (
+                <span className="ml-1.5 text-blue-500 text-[10px]">[stream]</span>
+              )}
+              {mc?.errorSummary && (
+                <span className="ml-1.5 text-red-500/80 truncate">— {mc.errorSummary.slice(0, 80)}</span>
+              )}
+            </>
+          ) : (
+            entry.message
+          )}
+        </span>
+
+        {/* 右侧标记 */}
         {isModelCall && (
-          <Badge variant="outline" className="h-4 px-1 text-[10px] shrink-0">
-            📡 调用
+          <Badge variant="outline" className="h-4 px-1 text-[10px] shrink-0 border-primary/30 text-primary bg-primary/5">
+            📡
           </Badge>
         )}
       </div>
 
       {/* 展开详情 */}
       {expanded && (
-        <div className="mt-1.5 ml-6 p-2 rounded bg-muted/40 font-mono text-[11px] space-y-0.5">
-          <div>
-            <span className="text-muted-foreground">timestamp:</span> {new Date(entry.timestamp).toISOString()}
-          </div>
-          <div>
-            <span className="text-muted-foreground">target:</span> {entry.target}
-          </div>
-          <div>
-            <span className="text-muted-foreground">kind:</span> {entry.kind}
-          </div>
-          {mc && (
-            <>
-              <div>
-                <span className="text-muted-foreground">credentialId:</span> #{mc.credentialId}
-              </div>
-              {mc.model && (
-                <div>
-                  <span className="text-muted-foreground">model:</span> {mc.model}
-                </div>
-              )}
-              <div>
-                <span className="text-muted-foreground">endpoint:</span> {mc.endpoint} · {mc.apiType}
-                {mc.isStream && <span className="ml-1 text-blue-500">[stream]</span>}
-              </div>
-              <div>
-                <span className="text-muted-foreground">status / duration:</span>{' '}
-                {mc.status} / {mc.durationMs}ms
-              </div>
-              {mc.retryAttempt > 0 && (
-                <div>
-                  <span className="text-muted-foreground">retryAttempt:</span> {mc.retryAttempt}
-                </div>
-              )}
-              {mc.errorSummary && (
-                <div className="text-red-500 break-all">
-                  <span className="text-muted-foreground">error:</span> {mc.errorSummary}
-                </div>
-              )}
-            </>
-          )}
-          {Object.keys(entry.fields).length > 0 && (
-            <div>
-              <span className="text-muted-foreground">fields:</span>
-              {Object.entries(entry.fields).map(([k, v]) => (
-                <div key={k} className="ml-3 break-all">
-                  <span className="text-muted-foreground">{k}:</span> {v}
-                </div>
-              ))}
-            </div>
-          )}
+        <div className="ml-7 mr-3 mb-2 mt-0.5 p-3 rounded-md bg-muted/40 border border-border/50 text-xs">
+          <ExpandedDetails entry={entry} />
         </div>
       )}
     </div>
+  )
+}
+
+function ExpandedDetails({ entry }: { entry: LogEntry }) {
+  const mc = entry.modelCall
+  const rows: { label: string; value: React.ReactNode; mono?: boolean; copy?: string }[] = []
+
+  rows.push({
+    label: '时间',
+    value: new Date(entry.timestamp).toISOString(),
+    mono: true,
+  })
+  rows.push({
+    label: '来源',
+    value: entry.target,
+    mono: true,
+  })
+  rows.push({
+    label: '消息',
+    value: entry.message || <span className="text-muted-foreground/60">—</span>,
+    copy: entry.message,
+  })
+
+  if (mc) {
+    rows.push({ label: '凭据', value: `#${mc.credentialId}`, mono: true })
+    if (mc.model) rows.push({ label: '模型', value: mc.model, mono: true })
+    rows.push({
+      label: '端点',
+      value: `${mc.endpoint} · ${mc.apiType}${mc.isStream ? ' [stream]' : ''}`,
+      mono: true,
+    })
+    rows.push({ label: '状态', value: String(mc.status), mono: true })
+    rows.push({ label: '耗时', value: `${mc.durationMs} ms`, mono: true })
+    if (mc.retryAttempt > 0) rows.push({ label: '重试次数', value: String(mc.retryAttempt), mono: true })
+    if (mc.errorSummary) {
+      rows.push({
+        label: '错误摘要',
+        value: <span className="text-red-600 dark:text-red-400 break-all">{mc.errorSummary}</span>,
+        copy: mc.errorSummary,
+      })
+    }
+  }
+
+  return (
+    <div className="space-y-1">
+      <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+        {rows.map((r, i) => (
+          <DetailRow key={i} label={r.label} value={r.value} mono={r.mono} copy={r.copy} />
+        ))}
+      </div>
+      {Object.keys(entry.fields).length > 0 && (
+        <>
+          <div className="text-[10px] uppercase tracking-wide text-muted-foreground mt-2 mb-1">附加字段</div>
+          <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 pl-2 border-l-2 border-border/50">
+            {Object.entries(entry.fields).map(([k, v]) => (
+              <DetailRow key={k} label={k} value={v} mono copy={v} />
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function DetailRow({
+  label,
+  value,
+  mono,
+  copy,
+}: {
+  label: string
+  value: React.ReactNode
+  mono?: boolean
+  copy?: string
+}) {
+  return (
+    <>
+      <div className="text-muted-foreground text-[11px] pt-0.5 shrink-0">{label}</div>
+      <div className={`${mono ? 'font-mono' : ''} text-[11px] group/row flex items-start gap-1`}>
+        <span className="break-all flex-1">{value}</span>
+        {copy && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              copyToClipboard(copy)
+            }}
+            className="opacity-0 group-hover/row:opacity-100 transition shrink-0 h-4 w-4 inline-flex items-center justify-center text-muted-foreground hover:text-foreground"
+            title="复制"
+          >
+            <Copy className="h-3 w-3" />
+          </button>
+        )}
+      </div>
+    </>
   )
 }

@@ -9,6 +9,7 @@
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// 默认容量（约 25 MB 内存）
 pub const DEFAULT_LOG_CAPACITY: usize = 50_000;
@@ -53,6 +54,8 @@ pub struct ModelCallMeta {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogEntry {
+    /// 单调递增的唯一 ID（buffer 启动起 0，递增；前端用作 React key + 展开状态键）
+    pub seq: u64,
     /// Unix 毫秒时间戳
     pub timestamp: i64,
     /// 等级（"INFO" / "WARN" / "ERROR"；模型调用按 status 推断）
@@ -92,6 +95,8 @@ pub struct LogRing {
     entries: Mutex<VecDeque<LogEntry>>,
     /// 容量，调整后旧条目可能被立刻挤出
     capacity: Mutex<usize>,
+    /// 单调递增的 seq 计数器（保证唯一 ID，前端展开状态键）
+    next_seq: AtomicU64,
 }
 
 impl LogRing {
@@ -100,11 +105,14 @@ impl LogRing {
         Self {
             entries: Mutex::new(VecDeque::with_capacity(cap)),
             capacity: Mutex::new(cap),
+            next_seq: AtomicU64::new(0),
         }
     }
 
     /// 追加一条日志。容量满时挤出最旧。
-    pub fn push(&self, entry: LogEntry) {
+    /// 自动分配 seq（调用方传入的 seq 字段会被覆盖）。
+    pub fn push(&self, mut entry: LogEntry) {
+        entry.seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         let cap = *self.capacity.lock();
         let mut buf = self.entries.lock();
         if buf.len() >= cap {

@@ -123,6 +123,8 @@ export interface ModelCallMeta {
 }
 
 export interface LogEntry {
+  /** 单调递增唯一 ID，前端用作 React key + 展开状态键 */
+  seq: number
   timestamp: number // Unix ms
   level: string // INFO / WARN / ERROR
   kind: LogKind
