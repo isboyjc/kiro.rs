@@ -29,6 +29,22 @@ export interface CredentialStatusItem {
   endpoint: string
 }
 
+// 缓存余额条目（来自 GET /credentials/balances/cached，纯磁盘缓存快照）
+export interface CachedBalanceInfo {
+  id: number
+  remaining: number
+  usageLimit: number
+  usagePercentage: number
+  subscriptionTitle: string | null
+  cachedAt: number // Unix 毫秒
+  ttlSecs: number
+}
+
+// 所有凭据的缓存余额响应
+export interface CachedBalancesResponse {
+  balances: CachedBalanceInfo[]
+}
+
 // 余额响应
 export interface BalanceResponse {
   id: number

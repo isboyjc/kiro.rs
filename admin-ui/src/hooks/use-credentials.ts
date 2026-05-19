@@ -6,6 +6,7 @@ import {
   resetCredentialFailure,
   forceRefreshToken,
   getCredentialBalance,
+  getCachedBalances,
   addCredential,
   deleteCredential,
   getLoadBalancingMode,
@@ -30,6 +31,16 @@ export function useCredentialBalance(id: number | null) {
     queryFn: () => getCredentialBalance(id!),
     enabled: id !== null,
     retry: false, // 余额查询失败时不重试（避免重复请求被封禁的账号）
+  })
+}
+
+// 查询所有凭据的缓存余额（轻量、纯读后端缓存、不触发号池上游请求）
+export function useCachedBalances() {
+  return useQuery({
+    queryKey: ['cached-balances'],
+    queryFn: getCachedBalances,
+    refetchInterval: 30000, // 每 30 秒拉取一次
+    staleTime: 10000,
   })
 }
 

@@ -15,7 +15,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import type { CredentialStatusItem, BalanceResponse } from '@/types/api'
+import type { CredentialStatusItem, BalanceResponse, CachedBalanceInfo } from '@/types/api'
 import {
   useSetDisabled,
   useSetPriority,
@@ -31,6 +31,20 @@ interface CredentialCardProps {
   onToggleSelect: () => void
   balance: BalanceResponse | null
   loadingBalance: boolean
+  /** 阶段 5.3d：后端缓存余额（不触发上游请求），无 live balance 时降级展示 */
+  cachedBalance?: CachedBalanceInfo
+}
+
+function formatCacheAge(cachedAt: number): string {
+  const diff = Date.now() - cachedAt
+  if (diff < 0) return '刚刚'
+  const seconds = Math.floor(diff / 1000)
+  if (seconds < 60) return `${seconds} 秒前`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes} 分钟前`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} 小时前`
+  return `${Math.floor(hours / 24)} 天前`
 }
 
 function formatLastUsed(lastUsedAt: string | null): string {
@@ -56,6 +70,7 @@ export function CredentialCard({
   onToggleSelect,
   balance,
   loadingBalance,
+  cachedBalance,
 }: CredentialCardProps) {
   const [editingPriority, setEditingPriority] = useState(false)
   const [priorityValue, setPriorityValue] = useState(String(credential.priority))
@@ -247,7 +262,7 @@ export function CredentialCard({
               <span className="font-medium">
                 {loadingBalance ? (
                   <Loader2 className="inline w-3 h-3 animate-spin" />
-                ) : balance?.subscriptionTitle || '未知'}
+                ) : (balance?.subscriptionTitle ?? cachedBalance?.subscriptionTitle ?? '未知')}
               </span>
             </div>
             <div>
@@ -275,6 +290,13 @@ export function CredentialCard({
                   {balance.remaining.toFixed(2)} / {balance.usageLimit.toFixed(2)}
                   <span className="text-xs text-muted-foreground ml-1">
                     ({(100 - balance.usagePercentage).toFixed(1)}% 剩余)
+                  </span>
+                </span>
+              ) : cachedBalance && cachedBalance.usageLimit > 0 ? (
+                <span className="font-medium ml-1">
+                  {cachedBalance.remaining.toFixed(2)} / {cachedBalance.usageLimit.toFixed(2)}
+                  <span className="text-xs text-muted-foreground ml-1">
+                    ({(100 - cachedBalance.usagePercentage).toFixed(1)}% 剩余, {formatCacheAge(cachedBalance.cachedAt)}缓存)
                   </span>
                 </span>
               ) : (

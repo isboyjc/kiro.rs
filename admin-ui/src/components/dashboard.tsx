@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react'
-import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, Trash2, RotateCcw, CheckCircle2 } from 'lucide-react'
+import { useState, useEffect, useMemo, useRef } from 'react'
+import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, Trash2, RotateCcw, CheckCircle2, ArrowUp, ArrowDown } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { storage } from '@/lib/storage'
@@ -11,14 +11,17 @@ import { BalanceDialog } from '@/components/balance-dialog'
 import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { ImportTokenJsonDialog } from '@/components/import-token-json-dialog'
 import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
-import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode, useSetLoadBalancingMode } from '@/hooks/use-credentials'
+import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode, useSetLoadBalancingMode, useCachedBalances } from '@/hooks/use-credentials'
 import { getCredentialBalance, forceRefreshToken } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
-import type { BalanceResponse } from '@/types/api'
+import type { BalanceResponse, CachedBalanceInfo } from '@/types/api'
 
 interface DashboardProps {
   onLogout: () => void
 }
+
+type SortField = 'default' | 'id' | 'balance' | 'priority' | 'lastUsed'
+type SortOrder = 'asc' | 'desc'
 
 export function Dashboard({ onLogout }: DashboardProps) {
   const [selectedCredentialId, setSelectedCredentialId] = useState<number | null>(null)
@@ -39,6 +42,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const cancelVerifyRef = useRef(false)
   const [currentPage, setCurrentPage] = useState(1)
   const itemsPerPage = 12
+  const [sortField, setSortField] = useState<SortField>('default')
+  const [sortOrder, setSortOrder] = useState<SortOrder>('asc')
   const [darkMode, setDarkMode] = useState(() => {
     if (typeof window !== 'undefined') {
       return document.documentElement.classList.contains('dark')
@@ -52,12 +57,53 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const { mutate: resetFailure } = useResetFailure()
   const { data: loadBalancingData, isLoading: isLoadingMode } = useLoadBalancingMode()
   const { mutate: setLoadBalancingMode, isPending: isSettingMode } = useSetLoadBalancingMode()
+  const { data: cachedBalancesData } = useCachedBalances()
+
+  // 阶段 5.3d：构建 id -> CachedBalanceInfo 映射，供 card 降级展示 + 排序使用
+  const cachedBalanceMap = useMemo(() => {
+    const m = new Map<number, CachedBalanceInfo>()
+    cachedBalancesData?.balances.forEach(b => m.set(b.id, b))
+    return m
+  }, [cachedBalancesData])
+
+  // 阶段 5.3d：排序后的凭据列表
+  const sortedCredentials = useMemo(() => {
+    const credentials = data?.credentials || []
+    if (sortField === 'default') return credentials
+    return [...credentials].sort((a, b) => {
+      let cmp = 0
+      if (sortField === 'id') {
+        cmp = a.id - b.id
+      } else if (sortField === 'priority') {
+        cmp = a.priority - b.priority
+      } else if (sortField === 'balance') {
+        const balA = cachedBalanceMap.get(a.id)?.remaining ?? -Infinity
+        const balB = cachedBalanceMap.get(b.id)?.remaining ?? -Infinity
+        cmp = balA - balB
+      } else if (sortField === 'lastUsed') {
+        const ta = a.lastUsedAt ? new Date(a.lastUsedAt).getTime() : 0
+        const tb = b.lastUsedAt ? new Date(b.lastUsedAt).getTime() : 0
+        cmp = ta - tb
+      }
+      return sortOrder === 'asc' ? cmp : -cmp
+    })
+  }, [data?.credentials, sortField, sortOrder, cachedBalanceMap])
 
   // 计算分页
-  const totalPages = Math.ceil((data?.credentials.length || 0) / itemsPerPage)
+  const totalPages = Math.ceil(sortedCredentials.length / itemsPerPage)
   const startIndex = (currentPage - 1) * itemsPerPage
   const endIndex = startIndex + itemsPerPage
-  const currentCredentials = data?.credentials.slice(startIndex, endIndex) || []
+  const currentCredentials = sortedCredentials.slice(startIndex, endIndex)
+
+  const handleSortChange = (field: SortField) => {
+    if (field === sortField) {
+      setSortOrder(prev => prev === 'asc' ? 'desc' : 'asc')
+    } else {
+      setSortField(field)
+      // 余额 / 最后调用默认从大到小（最新/最多优先）
+      setSortOrder(field === 'balance' || field === 'lastUsed' ? 'desc' : 'asc')
+    }
+  }
   const disabledCredentialCount = data?.credentials.filter(credential => credential.disabled).length || 0
   const selectedDisabledCount = Array.from(selectedIds).filter(id => {
     const credential = data?.credentials.find(c => c.id === id)
@@ -392,6 +438,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
     }
 
     setQueryingInfo(false)
+    // 后端 get_balance 已写入磁盘缓存，刷新 cached-balances 让其他卡片也能拿到最新值
+    queryClient.invalidateQueries({ queryKey: ['cached-balances'] })
 
     if (failCount === 0) {
       toast.success(`查询完成：成功 ${successCount}/${ids.length}`)
@@ -606,9 +654,37 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
         {/* 凭据列表 */}
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between flex-wrap gap-2">
             <div className="flex items-center gap-4">
               <h2 className="text-xl font-semibold">凭据管理</h2>
+              {/* 阶段 5.3d：排序控件 */}
+              <div className="flex items-center gap-1">
+                {([
+                  ['default', '默认'],
+                  ['id', 'ID'],
+                  ['priority', '优先级'],
+                  ['balance', '余额'],
+                  ['lastUsed', '最后调用'],
+                ] as const).map(([field, label]) => {
+                  const active = sortField === field
+                  return (
+                    <Button
+                      key={field}
+                      size="sm"
+                      variant={active ? 'secondary' : 'ghost'}
+                      className="h-7 px-2 text-xs"
+                      onClick={() => handleSortChange(field)}
+                    >
+                      {label}
+                      {active && field !== 'default' && (
+                        sortOrder === 'asc'
+                          ? <ArrowUp className="h-3 w-3 ml-0.5" />
+                          : <ArrowDown className="h-3 w-3 ml-0.5" />
+                      )}
+                    </Button>
+                  )
+                })}
+              </div>
               {selectedIds.size > 0 && (
                 <div className="flex items-center gap-2">
                   <Badge variant="secondary">已选择 {selectedIds.size} 个</Badge>
@@ -708,6 +784,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                     onToggleSelect={() => toggleSelect(credential.id)}
                     balance={balanceMap.get(credential.id) || null}
                     loadingBalance={loadingBalanceIds.has(credential.id)}
+                    cachedBalance={cachedBalanceMap.get(credential.id)}
                   />
                 ))}
               </div>
