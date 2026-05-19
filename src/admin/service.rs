@@ -930,9 +930,13 @@ impl AdminService {
         if new_config.extract_thinking != old_config.extract_thinking {
             *self.extract_thinking_shared.write() = new_config.extract_thinking;
         }
-        if new_config.credential_rpm != old_config.credential_rpm {
-            self.token_manager
-                .update_credential_rpm(new_config.credential_rpm);
+        if new_config.credential_rpm != old_config.credential_rpm
+            || new_config.daily_max_requests != old_config.daily_max_requests
+        {
+            self.token_manager.update_rate_limit_config(
+                new_config.credential_rpm,
+                new_config.daily_max_requests,
+            );
         }
 
         // 鉴权类热轮换（即使在 needs_restart 集合外，也立刻生效）
@@ -1039,6 +1043,7 @@ fn diff_config_fields(old: &Config, new: &Config) -> (Vec<String>, Vec<String>) 
     diff!(load_balancing_mode, "loadBalancingMode", hot);
     diff!(extract_thinking, "extractThinking", hot);
     diff!(credential_rpm, "credentialRpm", hot);
+    diff!(daily_max_requests, "dailyMaxRequests", hot);
     // 鉴权类：通过 RwLock 热轮换
     diff!(api_key, "apiKey", hot);
     diff!(admin_api_key, "adminApiKey", hot);
@@ -1285,7 +1290,19 @@ fn build_config_schema() -> ConfigSchemaResponse {
                         "凭据 RPM",
                         "number",
                         false,
-                        "单凭据每分钟请求数上限。留空/0 用默认自适应（1-2s 随机间隔）；>0 固定间隔 = 60000/rpm 毫秒。每日 500 上限 + 指数退避 + suspend 检测不受影响",
+                        "单凭据每分钟请求数上限。留空/0 用默认自适应（1-2s 随机间隔）；>0 固定间隔 = 60000/rpm 毫秒。其他保护（每日上限 / 指数退避 / suspend 检测）独立工作",
+                    )
+                },
+                ConfigSchemaField {
+                    nullable: true,
+                    min: Some(0.0),
+                    placeholder: Some(s("留空 = 500（保守安全网）")),
+                    ..field(
+                        "dailyMaxRequests",
+                        "单凭据每日上限",
+                        "number",
+                        false,
+                        "24h 滚动窗口内单凭据最多成功请求次数。模拟人类使用强度，避免被风控。留空/0 用默认 500；大号池或高频使用可调高（如 1000-2000）",
                     )
                 },
                 ConfigSchemaField {

@@ -69,19 +69,25 @@ fn mask_api_key(key: &str) -> String {
     }
 }
 
-/// 阶段 7.6：把用户配置 credential_rpm 翻译成 RateLimitConfig
+/// 阶段 7.6 / 7.7：把用户配置翻译成 RateLimitConfig
 ///
-/// - `None` / `0`：返回默认 (1-2s 随机间隔 + 30% 抖动)
-/// - `>0`：固定间隔 = 60000/rpm 毫秒，关闭抖动
+/// - `credential_rpm`：None / 0 → 默认 1-2s 随机间隔；>0 → 固定 60000/rpm ms 间隔（关闭抖动）
+/// - `daily_max_requests`：None / 0 → 默认 500；>0 → 覆盖
 ///
-/// 其余字段（daily_max_requests / backoff 三项）保持 default。
-fn build_rate_limit_config(credential_rpm: Option<u32>) -> RateLimitConfig {
+/// 其余字段（backoff 三项）保持 default。
+fn build_rate_limit_config(
+    credential_rpm: Option<u32>,
+    daily_max_requests: Option<u32>,
+) -> RateLimitConfig {
     let mut cfg = RateLimitConfig::default();
     if let Some(rpm) = credential_rpm.filter(|&v| v > 0) {
         let interval_ms = (60_000u64 / rpm as u64).max(1);
         cfg.min_interval_ms = interval_ms;
         cfg.max_interval_ms = interval_ms;
         cfg.jitter_percent = 0.0;
+    }
+    if let Some(daily) = daily_max_requests.filter(|&v| v > 0) {
+        cfg.daily_max_requests = daily;
     }
     cfg
 }
@@ -608,8 +614,9 @@ impl MultiTokenManager {
         credentials_path: Option<PathBuf>,
         is_multiple_format: bool,
     ) -> anyhow::Result<Self> {
-        // 阶段 7.6：用户配置 credential_rpm 翻译为 RateLimitConfig
-        let rate_limit_config = build_rate_limit_config(config.credential_rpm);
+        // 阶段 7.6 / 7.7：用户配置翻译为 RateLimitConfig
+        let rate_limit_config =
+            build_rate_limit_config(config.credential_rpm, config.daily_max_requests);
 
         // 计算当前最大 ID，为没有 ID 的凭据分配新 ID
         let max_existing_id = credentials.iter().filter_map(|c| c.id).max().unwrap_or(0);
@@ -1743,11 +1750,19 @@ impl MultiTokenManager {
         Ok(())
     }
 
-    /// 阶段 7.6：热更新 credential_rpm，立刻应用到 rate_limiter 配置
-    pub fn update_credential_rpm(&self, rpm: Option<u32>) {
-        let new_cfg = build_rate_limit_config(rpm);
+    /// 阶段 7.6 / 7.7：热更新 RateLimiter 配置（credential_rpm + daily_max_requests）
+    pub fn update_rate_limit_config(
+        &self,
+        credential_rpm: Option<u32>,
+        daily_max_requests: Option<u32>,
+    ) {
+        let new_cfg = build_rate_limit_config(credential_rpm, daily_max_requests);
         self.rate_limiter.update_config(new_cfg);
-        tracing::info!(?rpm, "credential_rpm 已热更新");
+        tracing::info!(
+            ?credential_rpm,
+            ?daily_max_requests,
+            "rate_limit_config 已热更新"
+        );
     }
 
     /// 设置凭据 endpoint（Admin API，阶段 7.5）

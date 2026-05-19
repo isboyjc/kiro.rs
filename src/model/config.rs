@@ -99,10 +99,21 @@ pub struct Config {
     /// - `None` 或 `0`：使用内置自适应策略（默认 1-2 秒随机间隔 + 30% 抖动）
     /// - `>0`：固定请求间隔 = `60_000 / rpm` 毫秒（关闭抖动）
     ///
-    /// 其他保护参数（每日 500 上限 / 指数退避 / suspend 关键词识别）独立工作，
+    /// 其他保护参数（每日上限 / 指数退避 / suspend 关键词识别）独立工作，
     /// 不受此字段影响。
     #[serde(default)]
     pub credential_rpm: Option<u32>,
+
+    /// 单凭据每日成功请求数上限 —— 阶段 7.7 引入
+    ///
+    /// 模拟人类使用强度，避免单号被 Kiro 风控识别为自动化滥用。计数器
+    /// 采用 24 小时滚动窗口，仅 `record_success` 累加（429 / 401 等失败不计）。
+    /// 触顶后该凭据阻塞到下次重置，由选号逻辑切换到其他可用凭据。
+    ///
+    /// - `None` / `0`：使用内置默认 500（保守安全网）
+    /// - `>0`：覆盖默认值；大号池 / 高频脚本可调高
+    #[serde(default)]
+    pub daily_max_requests: Option<u32>,
 
     /// 是否开启非流式响应的 thinking 块提取（默认 true）
     ///
@@ -213,6 +224,7 @@ impl Default for Config {
             admin_api_key: None,
             load_balancing_mode: default_load_balancing_mode(),
             credential_rpm: None,
+            daily_max_requests: None,
             extract_thinking: default_extract_thinking(),
             default_endpoint: default_endpoint(),
             endpoints: HashMap::new(),
