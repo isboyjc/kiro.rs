@@ -20,7 +20,7 @@ use std::time::{Duration as StdDuration, Instant};
 use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::affinity::UserAffinityManager;
 use crate::kiro::background_refresh::BackgroundRefresher;
-use crate::kiro::cooldown::CooldownManager;
+use crate::kiro::cooldown::{CooldownManager, CooldownReason};
 use crate::kiro::fingerprint::Fingerprint;
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
@@ -1521,6 +1521,87 @@ impl MultiTokenManager {
         // 持久化更改
         self.persist_credentials()?;
         Ok(())
+    }
+
+    // ========================================================================
+    // 阶段 4.4：凭据栈扩展 accessor 与状态管理
+    // caller 阶段 4.5（get_available_credential 重写）与 4.6（provider 接入）使用
+    // ========================================================================
+
+    /// 获取凭据级速率限制器（供 caller 进行 RPM 检查）
+    #[allow(dead_code)]
+    pub fn rate_limiter(&self) -> &RateLimiter {
+        &self.rate_limiter
+    }
+
+    /// 获取冷却管理器（供 caller 进行 429 退避查询）
+    #[allow(dead_code)]
+    pub fn cooldown_manager(&self) -> &CooldownManager {
+        &self.cooldown_manager
+    }
+
+    /// 设置凭据冷却（按 reason 内置的默认时长）
+    #[allow(dead_code)]
+    pub fn set_credential_cooldown(&self, id: u64, reason: CooldownReason) -> StdDuration {
+        let dur = self.cooldown_manager.set_cooldown(id, reason);
+        tracing::warn!(
+            credential_id = id,
+            reason = ?reason,
+            duration_ms = dur.as_millis() as u64,
+            "凭据进入冷却"
+        );
+        dur
+    }
+
+    /// 设置凭据冷却（自定义时长，覆盖 reason 默认）
+    #[allow(dead_code)]
+    pub fn set_credential_cooldown_with_duration(
+        &self,
+        id: u64,
+        reason: CooldownReason,
+        duration: StdDuration,
+    ) {
+        self.cooldown_manager
+            .set_cooldown_with_duration(id, reason, Some(duration));
+        tracing::warn!(
+            credential_id = id,
+            reason = ?reason,
+            duration_ms = duration.as_millis() as u64,
+            "凭据进入冷却（自定义时长）"
+        );
+    }
+
+    /// 清除凭据冷却状态
+    #[allow(dead_code)]
+    pub fn clear_credential_cooldown(&self, id: u64) -> bool {
+        let cleared = self.cooldown_manager.clear_cooldown(id);
+        if cleared {
+            tracing::info!(credential_id = id, "凭据冷却已清除");
+        }
+        cleared
+    }
+
+    /// 综合判断凭据是否当前可用：未禁用 + 未冷却 + 未限流
+    ///
+    /// 注意：本方法仅做"读检查"，不消耗 rate_limiter token。
+    /// 真正调用前请用 `rate_limiter().try_acquire(id)` 获取限流许可。
+    #[allow(dead_code)]
+    pub fn is_credential_available(&self, id: u64) -> bool {
+        let disabled = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.disabled)
+                .unwrap_or(true)
+        };
+        if disabled {
+            return false;
+        }
+        if self.cooldown_manager.check_cooldown(id).is_some() {
+            return false;
+        }
+        self.rate_limiter.check_rate_limit(id).is_ok()
     }
 
     /// 设置凭据优先级（Admin API）
