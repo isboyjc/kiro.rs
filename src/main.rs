@@ -170,7 +170,7 @@ async fn main() {
         tls_backend: config.tls_backend,
     });
 
-    // 阶段 5.2：构建共享的 CompressionConfig 与 PromptCacheRuntime（admin/anthropic 共用）
+    // 阶段 5.2 / 7：构建共享的运行时状态（admin/anthropic 共用，全部支持热加载）
     let compression_config_shared = std::sync::Arc::new(parking_lot::RwLock::new(
         config.compression.clone(),
     ));
@@ -180,12 +180,16 @@ async fn main() {
             config.prompt_cache_accounting_enabled,
         ),
     ));
+    let api_key_shared = std::sync::Arc::new(parking_lot::RwLock::new(api_key.clone()));
+    let extract_thinking_shared = std::sync::Arc::new(parking_lot::RwLock::new(
+        config.extract_thinking,
+    ));
 
     // 构建 Anthropic API 路由（profile_arn 由 provider 层根据实际凭据动态注入）
     let anthropic_app = anthropic::create_router_with_provider(
-        &api_key,
+        api_key_shared.clone(),
         Some(kiro_provider),
-        config.extract_thinking,
+        extract_thinking_shared.clone(),
         compression_config_shared.clone(),
         prompt_cache_runtime.clone(),
     );
@@ -203,13 +207,18 @@ async fn main() {
             tracing::warn!("admin_api_key 配置为空，Admin API 未启用");
             anthropic_app
         } else {
+            let admin_key_shared = std::sync::Arc::new(parking_lot::RwLock::new(admin_key.clone()));
             let admin_service = admin::AdminService::new(
                 token_manager.clone(),
                 endpoint_names.clone(),
                 compression_config_shared.clone(),
                 prompt_cache_runtime.clone(),
+                api_key_shared.clone(),
+                admin_key_shared.clone(),
+                extract_thinking_shared.clone(),
+                std::path::PathBuf::from(&config_path),
             );
-            let admin_state = admin::AdminState::new(admin_key, admin_service);
+            let admin_state = admin::AdminState::with_shared_key(admin_key_shared, admin_service);
             let admin_app = admin::create_admin_router(admin_state);
 
             // 创建 Admin UI 路由

@@ -84,13 +84,14 @@ impl PromptCacheRuntime {
 /// 应用共享状态
 #[derive(Clone)]
 pub struct AppState {
-    /// API 密钥
-    pub api_key: String,
+    /// API 密钥（阶段 7：`Arc<RwLock<String>>` 支持 admin 热轮换，
+    /// 修改后下次请求生效，无需重启）
+    pub api_key: Arc<RwLock<String>>,
     /// Kiro Provider（可选，用于实际 API 调用）
     /// 内部使用 MultiTokenManager，已支持线程安全的多凭据管理
     pub kiro_provider: Option<Arc<KiroProvider>>,
-    /// 是否开启非流式响应的 thinking 块提取
-    pub extract_thinking: bool,
+    /// 是否开启非流式响应的 thinking 块提取（阶段 7：升级为 RwLock 支持热切换）
+    pub extract_thinking: Arc<RwLock<bool>>,
     /// 输入压缩与图片处理配置（阶段 3.2 接入，阶段 5.1 升级为 RwLock）
     ///
     /// `Arc<RwLock<CompressionConfig>>` 支持运行时热更新：阶段 5.2 的
@@ -108,9 +109,9 @@ impl AppState {
     /// 创建新的应用状态
     pub fn new(api_key: impl Into<String>, extract_thinking: bool) -> Self {
         Self {
-            api_key: api_key.into(),
+            api_key: Arc::new(RwLock::new(api_key.into())),
             kiro_provider: None,
-            extract_thinking,
+            extract_thinking: Arc::new(RwLock::new(extract_thinking)),
             compression_config: Arc::new(RwLock::new(CompressionConfig::default())),
             // 默认 TTL 300s（5m），accounting 启用——与 Anthropic ephemeral 默认值对齐
             prompt_cache_runtime: Arc::new(RwLock::new(PromptCacheRuntime::new(300, true))),
@@ -120,6 +121,18 @@ impl AppState {
     /// 设置 KiroProvider
     pub fn with_kiro_provider(mut self, provider: KiroProvider) -> Self {
         self.kiro_provider = Some(Arc::new(provider));
+        self
+    }
+
+    /// 设置共享的 api_key RwLock（admin 与 anthropic 共用同一把锁实现热轮换）
+    pub fn with_api_key_shared(mut self, api_key: Arc<RwLock<String>>) -> Self {
+        self.api_key = api_key;
+        self
+    }
+
+    /// 设置共享的 extract_thinking RwLock
+    pub fn with_extract_thinking_shared(mut self, extract_thinking: Arc<RwLock<bool>>) -> Self {
+        self.extract_thinking = extract_thinking;
         self
     }
 
@@ -141,6 +154,11 @@ impl AppState {
         self.prompt_cache_runtime = runtime;
         self
     }
+
+    /// 读取当前 extract_thinking 快照
+    pub fn extract_thinking_snapshot(&self) -> bool {
+        *self.extract_thinking.read()
+    }
 }
 
 /// API Key 认证中间件
@@ -149,8 +167,9 @@ pub async fn auth_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
+    let current_key = state.api_key.read().clone();
     match auth::extract_api_key(&request) {
-        Some(key) if auth::constant_time_eq(&key, &state.api_key) => next.run(request).await,
+        Some(key) if auth::constant_time_eq(&key, &current_key) => next.run(request).await,
         _ => {
             let error = ErrorResponse::authentication_error();
             (StatusCode::UNAUTHORIZED, Json(error)).into_response()

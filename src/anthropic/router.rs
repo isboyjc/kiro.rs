@@ -39,14 +39,19 @@ const MAX_BODY_SIZE: usize = 50 * 1024 * 1024;
 /// - `kiro_provider`: 可选的 KiroProvider，用于调用上游 API
 
 /// 创建带有 KiroProvider 的 Anthropic API 路由
+///
+/// `api_key` / `extract_thinking` 接收外部共享的 `Arc<RwLock<>>`——admin 端
+/// 写入后下次请求即生效，无需重启。
 pub fn create_router_with_provider(
-    api_key: impl Into<String>,
+    api_key: Arc<RwLock<String>>,
     kiro_provider: Option<KiroProvider>,
-    extract_thinking: bool,
+    extract_thinking: Arc<RwLock<bool>>,
     compression_config: Arc<RwLock<CompressionConfig>>,
     prompt_cache_runtime: Arc<RwLock<PromptCacheRuntime>>,
 ) -> Router {
-    let mut state = AppState::new(api_key, extract_thinking)
+    let mut state = AppState::new(String::new(), false)
+        .with_api_key_shared(api_key)
+        .with_extract_thinking_shared(extract_thinking)
         .with_compression_config_shared(compression_config)
         .with_prompt_cache_runtime(prompt_cache_runtime);
     if let Some(provider) = kiro_provider {

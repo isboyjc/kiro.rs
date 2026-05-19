@@ -6,7 +6,7 @@ use axum::{
     response::IntoResponse,
 };
 
-use crate::model::config::CompressionConfig;
+use crate::model::config::{CompressionConfig, Config};
 
 use super::{
     middleware::AdminState,
@@ -192,4 +192,45 @@ pub async fn import_token_json(
 ) -> impl IntoResponse {
     let response = state.service.import_token_json(req).await;
     Json(response)
+}
+
+// ============ 阶段 7: 配置面板 ============
+
+/// GET /api/admin/config
+/// 返回当前 config.json 内容（结构化）
+pub async fn get_config(State(state): State<AdminState>) -> impl IntoResponse {
+    match state.service.get_config() {
+        Ok(c) => Json(c).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// GET /api/admin/config/raw
+/// 返回原始 config.json 文本 + 文件路径
+pub async fn get_config_raw(State(state): State<AdminState>) -> impl IntoResponse {
+    match state.service.get_config_raw() {
+        Ok(c) => Json(c).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/config/validate
+/// 仅校验，不写盘
+pub async fn validate_config(
+    State(state): State<AdminState>,
+    Json(new_config): Json<Config>,
+) -> impl IntoResponse {
+    Json(state.service.validate_config(new_config))
+}
+
+/// PUT /api/admin/config
+/// 全量替换 + 写盘 + 投射热生效字段
+pub async fn update_config(
+    State(state): State<AdminState>,
+    Json(new_config): Json<Config>,
+) -> impl IntoResponse {
+    match state.service.update_config(new_config) {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
 }

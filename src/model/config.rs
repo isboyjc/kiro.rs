@@ -18,7 +18,7 @@ impl Default for TlsBackend {
 }
 
 /// KNA 应用配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
     #[serde(default = "default_host")]
@@ -218,7 +218,7 @@ fn default_prompt_cache_ttl_seconds() -> u64 {
 ///
 /// 阶段 3.1 仅图片处理相关字段（`image_max_*`、`image_multi_threshold`）生效；
 /// 压缩相关字段为阶段 3.2 预留 schema，当前未接入 caller。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CompressionConfig {
     /// 总开关，默认 true。当前仅图片处理路径检查此开关
@@ -383,6 +383,11 @@ impl Config {
     /// 获取配置文件路径（如果有）
     pub fn config_path(&self) -> Option<&Path> {
         self.config_path.as_deref()
+    }
+
+    /// 设置配置文件路径（用于 admin PUT /config 写盘场景）
+    pub fn set_config_path(&mut self, path: PathBuf) {
+        self.config_path = Some(path);
     }
 
     /// 将当前配置写回原始配置文件

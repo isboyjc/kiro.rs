@@ -16,11 +16,13 @@ use crate::model::config::CompressionConfig;
 use super::error::AdminServiceError;
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, BalanceResponse, CachedBalanceItem,
-    CachedBalancesResponse, CredentialStatusItem, CredentialsStatusResponse, ImportAction,
+    CachedBalancesResponse, ConfigFieldError, ConfigRawResponse, ConfigUpdateResponse,
+    ConfigValidateResponse, CredentialStatusItem, CredentialsStatusResponse, ImportAction,
     ImportItemResult, ImportSummary, ImportTokenJsonRequest, ImportTokenJsonResponse,
     LoadBalancingModeResponse, PromptCacheConfigResponse, SetLoadBalancingModeRequest,
     TokenJsonItem, UpdatePromptCacheConfigRequest,
 };
+use crate::model::config::Config;
 
 /// 余额缓存过期时间（秒），5 分钟
 const BALANCE_CACHE_TTL_SECS: i64 = 300;
@@ -47,14 +49,29 @@ pub struct AdminService {
     compression_config: Arc<RwLock<CompressionConfig>>,
     /// Prompt Cache 运行时（阶段 5.2：与 anthropic AppState 共享）
     prompt_cache_runtime: Arc<RwLock<PromptCacheRuntime>>,
+    /// 阶段 7：anthropic AppState 的 api_key 共享锁（支持热轮换）
+    api_key_shared: Arc<RwLock<String>>,
+    /// 阶段 7：AdminState 的 admin_api_key 共享锁（支持热轮换）
+    admin_api_key_shared: Arc<RwLock<String>>,
+    /// 阶段 7：anthropic AppState 的 extract_thinking 共享锁
+    extract_thinking_shared: Arc<RwLock<bool>>,
+    /// 阶段 7：config.json 文件路径（PUT /config 写盘用）
+    config_path: PathBuf,
+    /// 阶段 7：串行化 PUT /config 写流程，防并发覆盖
+    config_write_lock: Mutex<()>,
 }
 
 impl AdminService {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         token_manager: Arc<MultiTokenManager>,
         known_endpoints: impl IntoIterator<Item = String>,
         compression_config: Arc<RwLock<CompressionConfig>>,
         prompt_cache_runtime: Arc<RwLock<PromptCacheRuntime>>,
+        api_key_shared: Arc<RwLock<String>>,
+        admin_api_key_shared: Arc<RwLock<String>>,
+        extract_thinking_shared: Arc<RwLock<bool>>,
+        config_path: PathBuf,
     ) -> Self {
         let cache_path = token_manager
             .cache_dir()
@@ -69,6 +86,11 @@ impl AdminService {
             known_endpoints: known_endpoints.into_iter().collect(),
             compression_config,
             prompt_cache_runtime,
+            api_key_shared,
+            admin_api_key_shared,
+            extract_thinking_shared,
+            config_path,
+            config_write_lock: Mutex::new(()),
         }
     }
 
@@ -80,9 +102,15 @@ impl AdminService {
     }
 
     /// 全量替换 CompressionConfig（PUT 语义）
+    ///
+    /// 阶段 7：在内存更新同时持久化到 config.json，保持磁盘为单一真相源
     pub fn update_compression_config(&self, new_config: CompressionConfig) {
-        *self.compression_config.write() = new_config;
-        tracing::info!("CompressionConfig 已通过 admin API 热更新");
+        *self.compression_config.write() = new_config.clone();
+        if let Err(e) = self.persist_field(|cfg| cfg.compression = new_config) {
+            tracing::warn!("CompressionConfig 持久化失败（内存已更新）: {}", e);
+        } else {
+            tracing::info!("CompressionConfig 已通过 admin API 热更新并持久化");
+        }
     }
 
     /// 获取当前 Prompt Cache 配置
@@ -95,6 +123,8 @@ impl AdminService {
     }
 
     /// 全量替换 Prompt Cache 配置（TTL 变化会重建 cache_tracker）
+    ///
+    /// 阶段 7：内存更新后持久化到 config.json
     pub fn update_prompt_cache_config(&self, req: UpdatePromptCacheConfigRequest) {
         let UpdatePromptCacheConfigRequest {
             ttl_seconds,
@@ -103,11 +133,31 @@ impl AdminService {
         self.prompt_cache_runtime
             .write()
             .update(Some(ttl_seconds), Some(accounting_enabled));
-        tracing::info!(
-            ttl_seconds,
-            accounting_enabled,
-            "PromptCacheRuntime 已通过 admin API 热更新"
-        );
+        if let Err(e) = self.persist_field(|cfg| {
+            cfg.prompt_cache_ttl_seconds = ttl_seconds;
+            cfg.prompt_cache_accounting_enabled = accounting_enabled;
+        }) {
+            tracing::warn!("PromptCacheRuntime 持久化失败（内存已更新）: {}", e);
+        } else {
+            tracing::info!(
+                ttl_seconds,
+                accounting_enabled,
+                "PromptCacheRuntime 已通过 admin API 热更新并持久化"
+            );
+        }
+    }
+
+    /// 加载磁盘配置 → 应用闭包修改 → 写回。串行化由 `config_write_lock` 保证。
+    fn persist_field<F>(&self, mutate: F) -> anyhow::Result<()>
+    where
+        F: FnOnce(&mut Config),
+    {
+        let _guard = self.config_write_lock.lock();
+        let mut config = Config::load(&self.config_path)?;
+        config.set_config_path(self.config_path.clone());
+        mutate(&mut config);
+        config.save()?;
+        Ok(())
     }
 
     // ========================================================================
@@ -711,4 +761,244 @@ impl AdminService {
             AdminServiceError::InternalError(msg)
         }
     }
+
+    // ========================================================================
+    // 阶段 7: 配置面板（Raw JSON / 可视化共用此后端 API）
+    // ========================================================================
+
+    /// `GET /config` — 返回当前 config.json 内容（结构化）
+    ///
+    /// 单一真相源：以磁盘文件为准。运行期间通过其他 admin 端点修改过的
+    /// compression / prompt_cache / load_balancing 也会同步写盘，所以这里读到的
+    /// 就是当前生效状态。
+    pub fn get_config(&self) -> Result<Config, AdminServiceError> {
+        Config::load(&self.config_path)
+            .map_err(|e| AdminServiceError::InternalError(format!("读取配置失败: {}", e)))
+    }
+
+    /// `GET /config/raw` — 返回原始 JSON 文本
+    pub fn get_config_raw(&self) -> Result<ConfigRawResponse, AdminServiceError> {
+        let content = std::fs::read_to_string(&self.config_path).map_err(|e| {
+            AdminServiceError::InternalError(format!("读取配置文件失败: {}", e))
+        })?;
+        Ok(ConfigRawResponse {
+            content,
+            path: self.config_path.display().to_string(),
+        })
+    }
+
+    /// `POST /config/validate` — 仅校验，不写盘
+    pub fn validate_config(&self, new_config: Config) -> ConfigValidateResponse {
+        let current = match self.get_config() {
+            Ok(c) => c,
+            Err(_) => {
+                return ConfigValidateResponse {
+                    valid: false,
+                    errors: vec![ConfigFieldError {
+                        path: "".into(),
+                        message: "无法读取当前配置进行对比".into(),
+                    }],
+                    needs_restart: Vec::new(),
+                    hot_reload: Vec::new(),
+                };
+            }
+        };
+
+        let errors = validate_config_invariants(&new_config);
+        let (needs_restart, hot_reload) = diff_config_fields(&current, &new_config);
+
+        ConfigValidateResponse {
+            valid: errors.is_empty(),
+            errors,
+            needs_restart,
+            hot_reload,
+        }
+    }
+
+    /// `PUT /config` — 全量替换：校验 → 写盘 → 投射 A 类（热生效）字段
+    pub fn update_config(
+        &self,
+        new_config: Config,
+    ) -> Result<ConfigUpdateResponse, AdminServiceError> {
+        let _guard = self.config_write_lock.lock();
+
+        // 校验
+        let errors = validate_config_invariants(&new_config);
+        if !errors.is_empty() {
+            let summary = errors
+                .iter()
+                .map(|e| format!("{}: {}", e.path, e.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(AdminServiceError::InvalidCredential(format!(
+                "配置校验失败: {}",
+                summary
+            )));
+        }
+
+        let old_config = self.get_config()?;
+
+        // 写盘（带上 config_path 以确保 save 能找到目标）
+        let mut to_save = new_config.clone();
+        to_save.set_config_path(self.config_path.clone());
+        to_save
+            .save()
+            .map_err(|e| AdminServiceError::InternalError(format!("写入配置文件失败: {}", e)))?;
+
+        // 投射 A 类（热生效）字段到运行时状态
+        let (needs_restart, hot_reload) = diff_config_fields(&old_config, &new_config);
+
+        if new_config.compression != old_config.compression {
+            *self.compression_config.write() = new_config.compression.clone();
+        }
+        if new_config.prompt_cache_ttl_seconds != old_config.prompt_cache_ttl_seconds
+            || new_config.prompt_cache_accounting_enabled
+                != old_config.prompt_cache_accounting_enabled
+        {
+            self.prompt_cache_runtime.write().update(
+                Some(new_config.prompt_cache_ttl_seconds),
+                Some(new_config.prompt_cache_accounting_enabled),
+            );
+        }
+        if new_config.load_balancing_mode != old_config.load_balancing_mode {
+            // token_manager 内部会再次写盘（idempotent，因为我们刚写过相同值）
+            if let Err(e) = self
+                .token_manager
+                .set_load_balancing_mode(new_config.load_balancing_mode.clone())
+            {
+                tracing::warn!("投射 load_balancing_mode 到 token_manager 失败: {}", e);
+            }
+        }
+        if new_config.extract_thinking != old_config.extract_thinking {
+            *self.extract_thinking_shared.write() = new_config.extract_thinking;
+        }
+
+        // 鉴权类热轮换（即使在 needs_restart 集合外，也立刻生效）
+        let mut new_admin_api_key = None;
+        let mut new_api_key = None;
+        if let Some(new_key) = &new_config.api_key {
+            if old_config.api_key.as_deref() != Some(new_key.as_str()) {
+                *self.api_key_shared.write() = new_key.clone();
+                new_api_key = Some(new_key.clone());
+            }
+        }
+        if let Some(new_admin) = &new_config.admin_api_key {
+            if old_config.admin_api_key.as_deref() != Some(new_admin.as_str())
+                && !new_admin.trim().is_empty()
+            {
+                *self.admin_api_key_shared.write() = new_admin.clone();
+                new_admin_api_key = Some(new_admin.clone());
+            }
+        }
+
+        tracing::info!(
+            needs_restart = ?needs_restart,
+            hot_reload = ?hot_reload,
+            "config.json 已通过 admin API 更新"
+        );
+
+        Ok(ConfigUpdateResponse {
+            ok: true,
+            message: "配置已保存".to_string(),
+            needs_restart,
+            hot_reload,
+            new_admin_api_key,
+            new_api_key,
+        })
+    }
+}
+
+/// 字段不变量校验（结构校验由 serde 完成，这里只检查跨字段约束）
+fn validate_config_invariants(c: &Config) -> Vec<ConfigFieldError> {
+    let mut errors = Vec::new();
+    if c.host.trim().is_empty() {
+        errors.push(ConfigFieldError {
+            path: "host".into(),
+            message: "host 不能为空".into(),
+        });
+    }
+    if c.port == 0 {
+        errors.push(ConfigFieldError {
+            path: "port".into(),
+            message: "port 必须为 1-65535".into(),
+        });
+    }
+    if c.region.trim().is_empty() {
+        errors.push(ConfigFieldError {
+            path: "region".into(),
+            message: "region 不能为空".into(),
+        });
+    }
+    if c.api_key.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        errors.push(ConfigFieldError {
+            path: "apiKey".into(),
+            message: "apiKey 不能为空（否则客户端无法认证）".into(),
+        });
+    }
+    if c.load_balancing_mode != "priority" && c.load_balancing_mode != "balanced" {
+        errors.push(ConfigFieldError {
+            path: "loadBalancingMode".into(),
+            message: "必须是 'priority' 或 'balanced'".into(),
+        });
+    }
+    if let Some(admin) = &c.admin_api_key {
+        if !admin.is_empty() && admin.trim().is_empty() {
+            errors.push(ConfigFieldError {
+                path: "adminApiKey".into(),
+                message: "adminApiKey 不能仅为空白字符".into(),
+            });
+        }
+    }
+    errors
+}
+
+/// 对比新旧 Config，返回 (needs_restart, hot_reload) 字段名集合
+fn diff_config_fields(old: &Config, new: &Config) -> (Vec<String>, Vec<String>) {
+    let mut needs_restart = Vec::new();
+    let mut hot_reload = Vec::new();
+
+    macro_rules! diff {
+        ($field:ident, $name:expr, hot) => {
+            if old.$field != new.$field {
+                hot_reload.push($name.to_string());
+            }
+        };
+        ($field:ident, $name:expr, restart) => {
+            if old.$field != new.$field {
+                needs_restart.push($name.to_string());
+            }
+        };
+    }
+
+    // 热生效字段（A 类）
+    diff!(compression, "compression", hot);
+    diff!(prompt_cache_ttl_seconds, "promptCacheTtlSeconds", hot);
+    diff!(prompt_cache_accounting_enabled, "promptCacheAccountingEnabled", hot);
+    diff!(load_balancing_mode, "loadBalancingMode", hot);
+    diff!(extract_thinking, "extractThinking", hot);
+    // 鉴权类：通过 RwLock 热轮换
+    diff!(api_key, "apiKey", hot);
+    diff!(admin_api_key, "adminApiKey", hot);
+
+    // 需重启字段（B 类）
+    diff!(host, "host", restart);
+    diff!(port, "port", restart);
+    diff!(region, "region", restart);
+    diff!(auth_region, "authRegion", restart);
+    diff!(api_region, "apiRegion", restart);
+    diff!(kiro_version, "kiroVersion", restart);
+    diff!(machine_id, "machineId", restart);
+    diff!(system_version, "systemVersion", restart);
+    diff!(node_version, "nodeVersion", restart);
+    diff!(tls_backend, "tlsBackend", restart);
+    diff!(count_tokens_api_url, "countTokensApiUrl", restart);
+    diff!(count_tokens_api_key, "countTokensApiKey", restart);
+    diff!(count_tokens_auth_type, "countTokensAuthType", restart);
+    diff!(proxy_url, "proxyUrl", restart);
+    diff!(proxy_username, "proxyUsername", restart);
+    diff!(proxy_password, "proxyPassword", restart);
+    diff!(default_endpoint, "defaultEndpoint", restart);
+    diff!(endpoints, "endpoints", restart);
+
+    (needs_restart, hot_reload)
 }

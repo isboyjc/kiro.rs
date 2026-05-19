@@ -405,3 +405,51 @@ pub struct ImportTokenJsonResponse {
     pub summary: ImportSummary,
     pub items: Vec<ImportItemResult>,
 }
+
+// ============ 阶段 7: 配置面板 ============
+
+/// `GET /config/raw` 响应：返回 config.json 原文
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigRawResponse {
+    /// 原始 JSON 字符串（pretty）
+    pub content: String,
+    /// 配置文件绝对路径
+    pub path: String,
+}
+
+/// `POST /config/validate` 响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigValidateResponse {
+    pub valid: bool,
+    /// 校验失败的字段错误（path 用 JSON pointer 风格）
+    pub errors: Vec<ConfigFieldError>,
+    /// 需要重启才能生效的字段名集合（与当前生效值对比得出）
+    pub needs_restart: Vec<String>,
+    /// 可热生效的字段名集合
+    pub hot_reload: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigFieldError {
+    pub path: String,
+    pub message: String,
+}
+
+/// `PUT /config` 响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigUpdateResponse {
+    pub ok: bool,
+    pub message: String,
+    pub needs_restart: Vec<String>,
+    pub hot_reload: Vec<String>,
+    /// 若 adminApiKey 被修改，返回新值便于前端自动重连（敏感，仅此一次出现在 response）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_admin_api_key: Option<String>,
+    /// 若 apiKey 被修改，返回新值便于前端展示给用户
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_api_key: Option<String>,
+}
