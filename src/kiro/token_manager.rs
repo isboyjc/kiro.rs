@@ -458,7 +458,11 @@ struct CredentialEntry {
 pub struct UsageSnapshot {
     pub current_usage: f64,
     pub usage_limit: f64,
+    /// 订阅名称（预留：未来若需要按 tier 推断基础额度时用）
+    #[allow(dead_code)]
     pub subscription_title: Option<String>,
+    /// 快照写入时间戳（预留：UI 展示数据新鲜度时用）
+    #[allow(dead_code)]
     pub updated_at_unix_sec: i64,
 }
 
