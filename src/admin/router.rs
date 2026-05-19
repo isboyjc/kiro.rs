@@ -9,9 +9,9 @@ use super::{
     handlers::{
         add_credential, delete_credential, force_refresh_token, get_all_credentials,
         get_compression_config, get_credential_balance, get_load_balancing_mode,
-        get_prompt_cache_config, reset_failure_count, set_credential_disabled,
-        set_credential_priority, set_load_balancing_mode, update_compression_config,
-        update_prompt_cache_config,
+        get_prompt_cache_config, import_token_json, reset_failure_count,
+        set_credential_disabled, set_credential_priority, set_load_balancing_mode,
+        update_compression_config, update_prompt_cache_config,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -40,6 +40,8 @@ pub fn create_admin_router(state: AdminState) -> Router {
             "/credentials",
             get(get_all_credentials).post(add_credential),
         )
+        // 阶段 5.3a 批量导入端点
+        .route("/credentials/import-token-json", post(import_token_json))
         .route("/credentials/{id}", delete(delete_credential))
         .route("/credentials/{id}/disabled", post(set_credential_disabled))
         .route("/credentials/{id}/priority", post(set_credential_priority))

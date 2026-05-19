@@ -1605,6 +1605,28 @@ impl MultiTokenManager {
         cleared
     }
 
+    /// 检查凭据池中是否已存在与给定 refresh_token 前 32 字符匹配的凭据
+    ///
+    /// 用于批量导入时去重——前缀匹配能在不存储/比较完整 token 的情况下
+    /// 快速识别"已知凭据"，避免把同一来源的 token 重复加入凭据池。
+    /// 使用 `floor_char_boundary` 防止在 UTF-8 多字节字符中间切割导致 panic。
+    pub fn has_refresh_token_prefix(&self, refresh_token: &str) -> bool {
+        let prefix_len = crate::common::utf8::floor_char_boundary(refresh_token, 32);
+        let new_prefix = &refresh_token[..prefix_len];
+
+        let entries = self.entries.lock();
+        entries.iter().any(|e| {
+            e.credentials
+                .refresh_token
+                .as_deref()
+                .map(|rt| {
+                    let existing_prefix_len = crate::common::utf8::floor_char_boundary(rt, 32);
+                    &rt[..existing_prefix_len] == new_prefix
+                })
+                .unwrap_or(false)
+        })
+    }
+
     /// 综合判断凭据是否当前可用：未禁用 + 未冷却 + 未限流
     ///
     /// 注意：本方法仅做"读检查"，不消耗 rate_limiter token。

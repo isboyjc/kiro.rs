@@ -11,8 +11,9 @@ use crate::model::config::CompressionConfig;
 use super::{
     middleware::AdminState,
     types::{
-        AddCredentialRequest, SetDisabledRequest, SetLoadBalancingModeRequest, SetPriorityRequest,
-        SuccessResponse, UpdatePromptCacheConfigRequest,
+        AddCredentialRequest, ImportTokenJsonRequest, SetDisabledRequest,
+        SetLoadBalancingModeRequest, SetPriorityRequest, SuccessResponse,
+        UpdatePromptCacheConfigRequest,
     },
 };
 
@@ -175,4 +176,14 @@ pub async fn update_prompt_cache_config(
 ) -> impl IntoResponse {
     state.service.update_prompt_cache_config(req);
     Json(SuccessResponse::new("PromptCacheRuntime 已热更新"))
+}
+
+/// POST /api/admin/credentials/import-token-json
+/// 批量导入 token.json 数组（支持单对象或数组、dry_run 预览）
+pub async fn import_token_json(
+    State(state): State<AdminState>,
+    Json(req): Json<ImportTokenJsonRequest>,
+) -> impl IntoResponse {
+    let response = state.service.import_token_json(req).await;
+    Json(response)
 }

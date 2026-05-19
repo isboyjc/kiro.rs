@@ -16,8 +16,10 @@ use crate::model::config::CompressionConfig;
 use super::error::AdminServiceError;
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem,
-    CredentialsStatusResponse, LoadBalancingModeResponse, PromptCacheConfigResponse,
-    SetLoadBalancingModeRequest, UpdatePromptCacheConfigRequest,
+    CredentialsStatusResponse, ImportAction, ImportItemResult, ImportSummary,
+    ImportTokenJsonRequest, ImportTokenJsonResponse, LoadBalancingModeResponse,
+    PromptCacheConfigResponse, SetLoadBalancingModeRequest, TokenJsonItem,
+    UpdatePromptCacheConfigRequest,
 };
 
 /// 余额缓存过期时间（秒），5 分钟
@@ -106,6 +108,190 @@ impl AdminService {
             accounting_enabled,
             "PromptCacheRuntime 已通过 admin API 热更新"
         );
+    }
+
+    // ========================================================================
+    // 阶段 5.3a: 批量导入 token.json
+    // ========================================================================
+
+    /// 批量导入 token.json 数组
+    ///
+    /// 逐项验证、去重、加入凭据池。任一项失败不影响其他项继续处理。
+    /// dry_run=true 时只做预览不实际写入。
+    pub async fn import_token_json(
+        &self,
+        req: ImportTokenJsonRequest,
+    ) -> ImportTokenJsonResponse {
+        let items = req.items.into_vec();
+        let dry_run = req.dry_run;
+
+        let mut results = Vec::with_capacity(items.len());
+        let mut added = 0usize;
+        let mut skipped = 0usize;
+        let mut invalid = 0usize;
+
+        for (index, item) in items.into_iter().enumerate() {
+            let result = self.process_token_json_item(index, item, dry_run).await;
+            match result.action {
+                ImportAction::Added => added += 1,
+                ImportAction::Skipped => skipped += 1,
+                ImportAction::Invalid => invalid += 1,
+            }
+            results.push(result);
+        }
+
+        tracing::info!(
+            parsed = results.len(),
+            added,
+            skipped,
+            invalid,
+            dry_run,
+            "批量 import_token_json 完成"
+        );
+
+        ImportTokenJsonResponse {
+            summary: ImportSummary {
+                parsed: results.len(),
+                added,
+                skipped,
+                invalid,
+            },
+            items: results,
+        }
+    }
+
+    async fn process_token_json_item(
+        &self,
+        index: usize,
+        item: TokenJsonItem,
+        dry_run: bool,
+    ) -> ImportItemResult {
+        let fingerprint = Self::generate_fingerprint(&item);
+
+        // 验证必填字段
+        let refresh_token = match &item.refresh_token {
+            Some(rt) if !rt.is_empty() => rt.clone(),
+            _ => {
+                return ImportItemResult {
+                    index,
+                    fingerprint,
+                    action: ImportAction::Invalid,
+                    reason: Some("缺少 refreshToken".to_string()),
+                    credential_id: None,
+                };
+            }
+        };
+
+        let auth_method = Self::map_auth_method(&item);
+
+        // IdC 需要 clientId 和 clientSecret
+        if auth_method == "idc" && (item.client_id.is_none() || item.client_secret.is_none()) {
+            return ImportItemResult {
+                index,
+                fingerprint,
+                action: ImportAction::Invalid,
+                reason: Some(format!("{} 认证需要 clientId 和 clientSecret", auth_method)),
+                credential_id: None,
+            };
+        }
+
+        // 通过 refresh_token 前 32 字符前缀去重
+        if self.token_manager.has_refresh_token_prefix(&refresh_token) {
+            return ImportItemResult {
+                index,
+                fingerprint,
+                action: ImportAction::Skipped,
+                reason: Some("凭据已存在".to_string()),
+                credential_id: None,
+            };
+        }
+
+        if dry_run {
+            return ImportItemResult {
+                index,
+                fingerprint,
+                action: ImportAction::Added,
+                reason: Some("预览模式".to_string()),
+                credential_id: None,
+            };
+        }
+
+        // trim region 字段（空字符串视为 None）
+        let region = item
+            .region
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let api_region = item
+            .api_region
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let new_cred = KiroCredentials {
+            refresh_token: Some(refresh_token),
+            auth_method: Some(auth_method),
+            client_id: item.client_id,
+            client_secret: item.client_secret,
+            priority: item.priority,
+            region,
+            api_region,
+            machine_id: item.machine_id,
+            ..KiroCredentials::default()
+        };
+
+        match self.token_manager.add_credential(new_cred).await {
+            Ok(credential_id) => ImportItemResult {
+                index,
+                fingerprint,
+                action: ImportAction::Added,
+                reason: None,
+                credential_id: Some(credential_id),
+            },
+            Err(e) => ImportItemResult {
+                index,
+                fingerprint,
+                action: ImportAction::Invalid,
+                reason: Some(e.to_string()),
+                credential_id: None,
+            },
+        }
+    }
+
+    /// 生成凭据指纹（refresh_token 前 16 字符，可读且不泄漏完整 token）
+    fn generate_fingerprint(item: &TokenJsonItem) -> String {
+        item.refresh_token
+            .as_deref()
+            .map(|rt| {
+                if rt.len() >= 16 {
+                    let end = crate::common::utf8::floor_char_boundary(rt, 16);
+                    format!("{}...", &rt[..end])
+                } else {
+                    rt.to_string()
+                }
+            })
+            .unwrap_or_else(|| "(empty)".to_string())
+    }
+
+    /// 映射 provider/authMethod 字段到标准 authMethod
+    fn map_auth_method(item: &TokenJsonItem) -> String {
+        if let Some(auth) = &item.auth_method {
+            let auth_lower = auth.to_lowercase();
+            return match auth_lower.as_str() {
+                "idc" | "builder-id" | "builderid" => "idc".to_string(),
+                "social" => "social".to_string(),
+                _ => auth_lower,
+            };
+        }
+
+        if let Some(provider) = &item.provider {
+            let provider_lower = provider.to_lowercase();
+            return match provider_lower.as_str() {
+                "builderid" | "builder-id" | "idc" => "idc".to_string(),
+                "social" => "social".to_string(),
+                _ => "social".to_string(),
+            };
+        }
+
+        "social".to_string()
     }
 
     /// 获取所有凭据状态

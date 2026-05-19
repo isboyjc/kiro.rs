@@ -279,3 +279,99 @@ pub struct UpdatePromptCacheConfigRequest {
     /// 新 accounting 开关
     pub accounting_enabled: bool,
 }
+
+// ============ 阶段 5.3a: 批量导入 token.json ============
+
+/// 单个 token.json 条目（容忍各种字段缺失，由后端做验证）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenJsonItem {
+    pub provider: Option<String>,
+    pub refresh_token: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub auth_method: Option<String>,
+    #[serde(default)]
+    pub priority: u32,
+    pub region: Option<String>,
+    pub api_region: Option<String>,
+    pub machine_id: Option<String>,
+}
+
+/// 兼容单对象和数组两种格式（serde untagged 自动分发）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ImportItems {
+    Single(TokenJsonItem),
+    Multiple(Vec<TokenJsonItem>),
+}
+
+impl ImportItems {
+    pub fn into_vec(self) -> Vec<TokenJsonItem> {
+        match self {
+            ImportItems::Single(item) => vec![item],
+            ImportItems::Multiple(items) => items,
+        }
+    }
+}
+
+fn default_dry_run() -> bool {
+    false
+}
+
+/// 批量导入请求
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportTokenJsonRequest {
+    /// dry_run=true 时只做预览，不实际加入凭据池
+    #[serde(default = "default_dry_run")]
+    pub dry_run: bool,
+    pub items: ImportItems,
+}
+
+/// 单项导入结果
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportItemResult {
+    /// 在请求数组中的索引（用于前端关联结果）
+    pub index: usize,
+    /// 凭据指纹（refresh_token 前 16 字符，可读且不泄漏完整 token）
+    pub fingerprint: String,
+    pub action: ImportAction,
+    /// 失败/跳过/dry_run 原因
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// 实际加入的凭据 ID（仅 Added 且非 dry_run 时填）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<u64>,
+}
+
+/// 导入动作
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImportAction {
+    /// 成功加入凭据池
+    Added,
+    /// 已存在（前缀匹配），跳过
+    Skipped,
+    /// 字段不合法或后端拒绝
+    Invalid,
+}
+
+/// 整批汇总
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSummary {
+    pub parsed: usize,
+    pub added: usize,
+    pub skipped: usize,
+    pub invalid: usize,
+}
+
+/// 批量导入响应
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportTokenJsonResponse {
+    pub summary: ImportSummary,
+    pub items: Vec<ImportItemResult>,
+}
