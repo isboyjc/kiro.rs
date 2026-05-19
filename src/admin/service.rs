@@ -372,7 +372,13 @@ impl AdminService {
                 proxy_url: entry.proxy_url,
                 refresh_failure_count: entry.refresh_failure_count,
                 disabled_reason: entry.disabled_reason,
-                endpoint: entry.endpoint.unwrap_or_else(|| default_endpoint.clone()),
+                effective_endpoint: entry
+                    .endpoint
+                    .clone()
+                    .unwrap_or_else(|| default_endpoint.clone()),
+                endpoint: entry.endpoint,
+                region: entry.region,
+                api_region: entry.api_region,
             })
             .collect();
 
@@ -408,6 +414,52 @@ impl AdminService {
     pub fn set_priority(&self, id: u64, priority: u32) -> Result<(), AdminServiceError> {
         self.token_manager
             .set_priority(id, priority)
+            .map_err(|e| self.classify_error(e, id))
+    }
+
+    /// 设置凭据 endpoint（None = 清除，回退默认）
+    pub fn set_endpoint(
+        &self,
+        id: u64,
+        endpoint: Option<String>,
+    ) -> Result<(), AdminServiceError> {
+        let endpoint = endpoint
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        if let Some(name) = endpoint.as_deref() {
+            if !self.known_endpoints.contains(name) {
+                let mut known: Vec<&str> =
+                    self.known_endpoints.iter().map(|s| s.as_str()).collect();
+                known.sort_unstable();
+                return Err(AdminServiceError::InvalidCredential(format!(
+                    "未知端点 \"{}\"，已注册: {:?}",
+                    name, known
+                )));
+            }
+        }
+
+        self.token_manager
+            .set_endpoint(id, endpoint)
+            .map_err(|e| self.classify_error(e, id))
+    }
+
+    /// 设置凭据 Region 与 API Region（任意 None = 清除该字段）
+    pub fn set_region(
+        &self,
+        id: u64,
+        region: Option<String>,
+        api_region: Option<String>,
+    ) -> Result<(), AdminServiceError> {
+        let region = region
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let api_region = api_region
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        self.token_manager
+            .set_region(id, region, api_region)
             .map_err(|e| self.classify_error(e, id))
     }
 

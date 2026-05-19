@@ -496,6 +496,12 @@ pub struct CredentialEntrySnapshot {
     /// 端点名称（未显式配置时返回 None，由 Admin 层回退到默认值）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+    /// 凭据级 Region（None = 使用全局 region）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// 凭据级 API Region（None = 使用全局 / 凭据 region）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_region: Option<String>,
 }
 
 /// 凭据管理器状态快照
@@ -1526,6 +1532,8 @@ impl MultiTokenManager {
                         DisabledReason::InvalidConfig => "InvalidConfig",
                     }.to_string()),
                     endpoint: e.credentials.endpoint.clone(),
+                    region: e.credentials.region.clone(),
+                    api_region: e.credentials.api_region.clone(),
                 })
                 .collect(),
             current_id,
@@ -1666,6 +1674,46 @@ impl MultiTokenManager {
         // 立即按新优先级重新选择当前凭据（无论持久化是否成功）
         self.select_highest_priority();
         // 持久化更改
+        self.persist_credentials()?;
+        Ok(())
+    }
+
+    /// 设置凭据 Region（Admin API，阶段 7.5）
+    ///
+    /// `region` 为 None 表示清除该凭据的 region 设置，回退到全局 region。
+    /// `api_region` 同理。
+    pub fn set_region(
+        &self,
+        id: u64,
+        region: Option<String>,
+        api_region: Option<String>,
+    ) -> anyhow::Result<()> {
+        {
+            let mut entries = self.entries.lock();
+            let entry = entries
+                .iter_mut()
+                .find(|e| e.id == id)
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+            entry.credentials.region = region;
+            entry.credentials.api_region = api_region;
+        }
+        self.persist_credentials()?;
+        Ok(())
+    }
+
+    /// 设置凭据 endpoint（Admin API，阶段 7.5）
+    ///
+    /// `endpoint` 为 None 表示清除该凭据的 endpoint 设置，回退到全局
+    /// `default_endpoint`。caller 需自行校验值是否在已注册端点集合中。
+    pub fn set_endpoint(&self, id: u64, endpoint: Option<String>) -> anyhow::Result<()> {
+        {
+            let mut entries = self.entries.lock();
+            let entry = entries
+                .iter_mut()
+                .find(|e| e.id == id)
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+            entry.credentials.endpoint = endpoint;
+        }
         self.persist_credentials()?;
         Ok(())
     }

@@ -60,6 +60,31 @@ export async function setCredentialPriority(
   return data
 }
 
+// 设置凭据 endpoint（endpoint=null 清除回退默认）
+export async function setCredentialEndpoint(
+  id: number,
+  endpoint: string | null
+): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(
+    `/credentials/${id}/endpoint`,
+    { endpoint }
+  )
+  return data
+}
+
+// 设置凭据 Region / API Region
+export async function setCredentialRegion(
+  id: number,
+  region: string | null,
+  apiRegion: string | null
+): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(
+    `/credentials/${id}/region`,
+    { region, apiRegion }
+  )
+  return data
+}
+
 // 重置失败计数
 export async function resetCredentialFailure(
   id: number

@@ -26,7 +26,14 @@ export interface CredentialStatusItem {
   proxyUrl?: string
   refreshFailureCount: number
   disabledReason?: string
-  endpoint: string
+  /** 凭据级 endpoint（未配置则缺省，回退到 effectiveEndpoint） */
+  endpoint?: string
+  /** 实际生效的 endpoint（含默认值回退后） */
+  effectiveEndpoint: string
+  /** 凭据级 Region（未配置则缺省） */
+  region?: string
+  /** 凭据级 API Region（未配置则缺省） */
+  apiRegion?: string
 }
 
 // === 阶段 7：Config 面板 ===

@@ -60,8 +60,17 @@ pub struct CredentialStatusItem {
     /// 禁用原因
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<String>,
-    /// 端点名称（决定该凭据走哪套 Kiro API，已回退到默认端点）
-    pub endpoint: String,
+    /// 凭据级 endpoint（None = 使用全局 defaultEndpoint）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// 实际生效的 endpoint（None 时回退到 defaultEndpoint）
+    pub effective_endpoint: String,
+    /// 凭据级 Region（None = 使用全局 region）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// 凭据级 API Region（None = 使用全局 / 凭据 region）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_region: Option<String>,
 }
 
 // ============ 操作请求 ============
@@ -80,6 +89,21 @@ pub struct SetDisabledRequest {
 pub struct SetPriorityRequest {
     /// 新优先级值
     pub priority: u32,
+}
+
+/// 修改 endpoint 请求（None = 清除，回退默认）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetEndpointRequest {
+    pub endpoint: Option<String>,
+}
+
+/// 修改 Region 请求（任意一项 None = 清除该字段）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetRegionRequest {
+    pub region: Option<String>,
+    pub api_region: Option<String>,
 }
 
 /// 添加凭据请求
