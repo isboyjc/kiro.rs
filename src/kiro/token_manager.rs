@@ -751,6 +751,15 @@ impl MultiTokenManager {
                 if is_opus && !e.credentials.supports_opus() {
                     return false;
                 }
+                // 阶段 4.5：跳过冷却中的凭据（429 退避期）
+                if self.cooldown_manager.check_cooldown(e.id).is_some() {
+                    return false;
+                }
+                // 阶段 4.5：跳过被限流的凭据（只检查，不消耗 token；
+                // 真正的 try_acquire 由 provider 在选定凭据后调用）
+                if self.rate_limiter.check_rate_limit(e.id).is_err() {
+                    return false;
+                }
                 true
             })
             .collect();
@@ -814,9 +823,16 @@ impl MultiTokenManager {
                 } else {
                     let entries = self.entries.lock();
                     let current_id = *self.current_id.lock();
+                    // 阶段 4.5：current_id 凭据也要通过 cooldown + rate_limit 检查；
+                    // 否则回退到 select_next_credential() 走完整过滤
                     entries
                         .iter()
-                        .find(|e| e.id == current_id && !e.disabled)
+                        .find(|e| {
+                            e.id == current_id
+                                && !e.disabled
+                                && self.cooldown_manager.check_cooldown(e.id).is_none()
+                                && self.rate_limiter.check_rate_limit(e.id).is_ok()
+                        })
                         .map(|e| (e.id, e.credentials.clone()))
                 };
 
