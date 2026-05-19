@@ -6,6 +6,9 @@ edition = "2024"
 [features]
 default = ["native-tls"]
 native-tls = ["reqwest/native-tls-vendored"]
+# 显式启用才允许打印潜在敏感信息（仅用于排障）。默认关闭，主凭证、
+# Kiro 请求体等日志会输出摘要字段；开启后输出完整内容。
+sensitive-logs = []
 
 [profile.release]
 lto = true

@@ -280,7 +280,13 @@ pub async fn post_messages(
         }
     };
 
+    #[cfg(feature = "sensitive-logs")]
     tracing::debug!("Kiro request body: {}", request_body);
+    #[cfg(not(feature = "sensitive-logs"))]
+    tracing::debug!(
+        request_body_bytes = request_body.len(),
+        "Kiro request body（仅大小；启用 sensitive-logs 后输出完整内容）"
+    );
 
     // 估算输入 tokens
     let input_tokens = token::count_all_tokens(
@@ -793,7 +799,13 @@ pub async fn post_messages_cc(
         }
     };
 
+    #[cfg(feature = "sensitive-logs")]
     tracing::debug!("Kiro request body: {}", request_body);
+    #[cfg(not(feature = "sensitive-logs"))]
+    tracing::debug!(
+        request_body_bytes = request_body.len(),
+        "Kiro request body（仅大小；启用 sensitive-logs 后输出完整内容）"
+    );
 
     // 估算输入 tokens
     let input_tokens = token::count_all_tokens(
