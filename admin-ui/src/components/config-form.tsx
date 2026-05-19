@@ -205,11 +205,14 @@ function FieldInput({
   }
 
   if (field.type === 'enum') {
+    // 若 defaultValue 是数字（如 promptCacheTtlSeconds 的 300/3600），存储为数字
+    const isNumeric = typeof field.defaultValue === 'number'
+    const stringValue = value == null ? '' : String(value)
     return (
       <select
         className="w-full h-9 px-2 text-sm border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary/40"
-        value={typeof value === 'string' ? value : ''}
-        onChange={(e) => onChange(e.target.value)}
+        value={stringValue}
+        onChange={(e) => onChange(isNumeric ? Number(e.target.value) : e.target.value)}
       >
         {field.enumOptions?.map((opt) => (
           <option key={opt.value} value={opt.value}>

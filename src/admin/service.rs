@@ -1381,9 +1381,12 @@ fn build_config_schema() -> ConfigSchemaResponse {
             sensitive: false,
             fields: vec![
                 ConfigSchemaField {
-                    min: Some(0.0),
+                    enum_options: vec![
+                        ConfigSchemaEnumOption { value: s("300"), label: s("5 分钟（300s）") },
+                        ConfigSchemaEnumOption { value: s("3600"), label: s("1 小时（3600s）") },
+                    ],
                     default_value: Some(json!(300)),
-                    ..field("promptCacheTtlSeconds", "TTL（秒）", "number", false, "300=5m，3600=1h；改动重建 tracker")
+                    ..field("promptCacheTtlSeconds", "TTL", "enum", false, "Anthropic ephemeral 支持 5m / 1h；改动重建 tracker")
                 },
                 ConfigSchemaField {
                     default_value: Some(json!(true)),
