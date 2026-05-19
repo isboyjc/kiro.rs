@@ -46,6 +46,8 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   const [validation, setValidation] = useState<ValidationState>(EMPTY_VALIDATION)
   const [showAdminConfirm, setShowAdminConfirm] = useState(false)
   const [pendingPayload, setPendingPayload] = useState<ConfigJson | null>(null)
+  /** 阶段 7.8：可视化表单字段级校验结果（path → 错误消息） */
+  const [formErrors, setFormErrors] = useState<Record<string, string>>({})
 
   const { data: rawData, isLoading: isLoadingRaw, refetch: refetchRaw } = useConfigRaw(open)
   const { data: schemaData, isLoading: isLoadingSchema } = useConfigSchema(open)
@@ -253,6 +255,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                     setText(JSON.stringify(next, null, 2))
                     setValidation(EMPTY_VALIDATION)
                   }}
+                  onValidation={setFormErrors}
                 />
               ) : null}
               {hasChanges && (
@@ -339,7 +342,17 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
             </div>
           )}
 
-          <DialogFooter className="gap-2">
+          <DialogFooter className="gap-2 items-center">
+            {/* 阶段 7.8：可视化表单 schema 校验错误汇总 */}
+            {tab === 'form' && Object.keys(formErrors).length > 0 && (
+              <div className="flex-1 text-xs text-red-600 flex items-center gap-1">
+                <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                <span>
+                  {Object.keys(formErrors).length} 项字段超出范围，无法保存。
+                  突破限制可切换到 Raw JSON 编辑
+                </span>
+              </div>
+            )}
             <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
             <Button
               variant="outline"
@@ -351,7 +364,12 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
             </Button>
             <Button
               onClick={handleSave}
-              disabled={isUpdating || !parsed || !hasChanges}
+              disabled={
+                isUpdating ||
+                !parsed ||
+                !hasChanges ||
+                (tab === 'form' && Object.keys(formErrors).length > 0)
+              }
             >
               {isUpdating ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Save className="h-4 w-4 mr-1" />}
               保存并应用

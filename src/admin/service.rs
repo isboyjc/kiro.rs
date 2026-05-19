@@ -1283,14 +1283,14 @@ fn build_config_schema() -> ConfigSchemaResponse {
                 ConfigSchemaField {
                     nullable: true,
                     min: Some(0.0),
-                    max: Some(600.0),
+                    max: Some(1200.0),
                     placeholder: Some(s("留空 / 0 = 自适应 1-2 秒")),
                     ..field(
                         "credentialRpm",
                         "凭据 RPM",
                         "number",
                         false,
-                        "单凭据每分钟请求数上限。留空/0 用默认自适应（1-2s 随机间隔）；>0 固定间隔 = 60000/rpm 毫秒。其他保护（每日上限 / 指数退避 / suspend 检测）独立工作",
+                        "单凭据每分钟请求数上限（每秒 ≤ 20）。留空/0 用默认自适应（1-2s 随机间隔）；>0 固定间隔 = 60000/rpm 毫秒。突破上限可走 Raw JSON。其他保护（每日上限 / 指数退避 / suspend 检测）独立工作",
                     )
                 },
                 ConfigSchemaField {

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { AlertCircle, Eye, EyeOff } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -17,6 +17,33 @@ interface ConfigFormProps {
   value: ConfigJson
   /** 字段路径 → 新值；form 内部直接 mutate value 并通过此回调上抛 */
   onChange: (next: ConfigJson) => void
+  /** 校验结果回调：path → 错误消息（无错误时 map 为空）。settings-dialog
+   *  用此决定是否禁用"保存并应用"按钮 */
+  onValidation?: (errors: Record<string, string>) => void
+}
+
+/** 阶段 7.8：按 schema 元数据校验单个字段，返回错误消息（null = 通过） */
+export function validateField(field: ConfigSchemaField, value: unknown): string | null {
+  // null / undefined / 空串
+  const isEmpty =
+    value == null || (typeof value === 'string' && value.trim() === '')
+  if (isEmpty) {
+    if (!field.nullable) return '不能为空'
+    return null
+  }
+  if (field.type === 'number') {
+    const n = typeof value === 'number' ? value : Number(value)
+    if (!Number.isFinite(n)) return '必须是有效数字'
+    if (field.min != null && n < field.min) return `不能小于 ${field.min}`
+    if (field.max != null && n > field.max) return `不能大于 ${field.max}`
+  }
+  if (field.type === 'enum') {
+    const allowed = field.enumOptions?.map((o) => o.value) ?? []
+    if (!allowed.includes(String(value))) {
+      return `只能是 ${allowed.join(' / ')}`
+    }
+  }
+  return null
 }
 
 /** 点号路径读取嵌套值 */
@@ -48,11 +75,34 @@ function setByPath(obj: ConfigJson, path: string, value: unknown): ConfigJson {
   return result
 }
 
-export function ConfigForm({ schema, value, onChange }: ConfigFormProps) {
+export function ConfigForm({ schema, value, onChange, onValidation }: ConfigFormProps) {
+  // 阶段 7.8：每次 value 或 schema 变化重新校验所有字段
+  const errors = useMemo(() => {
+    const errs: Record<string, string> = {}
+    for (const g of schema.groups) {
+      for (const f of g.fields) {
+        const v = getByPath(value, f.key)
+        const msg = validateField(f, v)
+        if (msg) errs[f.key] = msg
+      }
+    }
+    return errs
+  }, [schema, value])
+
+  useEffect(() => {
+    onValidation?.(errors)
+  }, [errors, onValidation])
+
   return (
     <div className="space-y-3 max-h-[500px] overflow-y-auto pr-1 -mr-1">
       {schema.groups.map((group) => (
-        <GroupCard key={group.id} group={group} value={value} onChange={onChange} />
+        <GroupCard
+          key={group.id}
+          group={group}
+          value={value}
+          onChange={onChange}
+          errors={errors}
+        />
       ))}
     </div>
   )
@@ -62,18 +112,32 @@ function GroupCard({
   group,
   value,
   onChange,
+  errors,
 }: {
   group: ConfigSchemaGroup
   value: ConfigJson
   onChange: (next: ConfigJson) => void
+  errors: Record<string, string>
 }) {
+  const groupErrorCount = group.fields.reduce(
+    (acc, f) => acc + (errors[f.key] ? 1 : 0),
+    0
+  )
+
   return (
-    <div className="rounded-lg border bg-card overflow-hidden">
+    <div className={`rounded-lg border bg-card overflow-hidden ${groupErrorCount > 0 ? 'border-red-300' : ''}`}>
       <div className="flex items-center justify-between px-3 py-2 bg-muted/30">
         <div className="flex items-center gap-2 min-w-0">
           <GroupDot needsRestart={group.needsRestart} sensitive={group.sensitive} />
           <div className="min-w-0">
-            <div className="font-medium text-sm">{group.label}</div>
+            <div className="font-medium text-sm flex items-center gap-2">
+              {group.label}
+              {groupErrorCount > 0 && (
+                <Badge variant="destructive" className="h-4 px-1.5 text-[10px]">
+                  {groupErrorCount} 项错误
+                </Badge>
+              )}
+            </div>
             {group.description && (
               <div className="text-[11px] text-muted-foreground mt-0.5 truncate">{group.description}</div>
             )}
@@ -87,6 +151,7 @@ function GroupCard({
             key={f.key}
             field={f}
             value={getByPath(value, f.key)}
+            error={errors[f.key]}
             onChange={(v) => onChange(setByPath(value, f.key, v))}
           />
         ))}
@@ -114,12 +179,15 @@ function FieldRow({
   field,
   value,
   onChange,
+  error,
 }: {
   field: ConfigSchemaField
   value: unknown
   onChange: (v: unknown) => void
+  error?: string
 }) {
   const [showSensitive, setShowSensitive] = useState(false)
+  const hasError = Boolean(error)
 
   return (
     <div className="grid grid-cols-12 gap-3 items-center">
@@ -140,7 +208,7 @@ function FieldRow({
       {/* 输入列 */}
       <div className="col-span-8 space-y-1">
         <div className="flex items-start gap-1">
-          <div className="flex-1">
+          <div className={`flex-1 ${hasError ? 'ring-1 ring-red-400 rounded-md' : ''}`}>
             <FieldInput
               field={field}
               value={value}
@@ -161,7 +229,13 @@ function FieldRow({
             </Button>
           )}
         </div>
-        {(field.description || field.warning) && (
+        {hasError && (
+          <div className="text-[11px] flex items-start gap-1 text-red-600 leading-tight">
+            <AlertCircle className="h-3 w-3 mt-0.5 shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
+        {!hasError && (field.description || field.warning) && (
           <div className="space-y-0.5">
             {field.description && (
               <div className="text-[11px] text-muted-foreground leading-tight">{field.description}</div>
