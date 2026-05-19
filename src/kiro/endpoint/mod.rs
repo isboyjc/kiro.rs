@@ -11,9 +11,25 @@ use reqwest::RequestBuilder;
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::model::config::Config;
 
+pub mod cli;
 pub mod ide;
 
-pub use ide::IdeEndpoint;
+// 阶段 4 接入 token_manager 后 *_ENDPOINT_NAME 会有内部使用；目前仅作 public API 暴露
+#[allow(unused_imports)]
+pub use cli::{CLI_ENDPOINT_NAME, CliEndpoint};
+#[allow(unused_imports)]
+pub use ide::{IDE_ENDPOINT_NAME, IdeEndpoint};
+
+/// `getUsageLimits` 请求所需的 URL 与端点特有头部
+///
+/// 由 endpoint 实现产出，caller 负责加上凭据无关的通用头与 body。
+#[allow(dead_code)] // 阶段 2 引入，阶段 4 重构 token_manager 时接入
+pub struct UsageRequestParts {
+    /// 完整 URL（含 query string）
+    pub url: String,
+    /// 端点特有的请求头列表（key 用 &'static str，value 为运行时拼装）
+    pub headers: Vec<(&'static str, String)>,
+}
 
 /// Kiro 端点
 ///
@@ -37,13 +53,20 @@ pub trait KiroEndpoint: Send + Sync {
     /// 装饰 MCP 请求的端点特有 header
     fn decorate_mcp(&self, req: RequestBuilder, ctx: &RequestContext<'_>) -> RequestBuilder;
 
-    /// 对已序列化的 API 请求体做端点特有加工（如注入 profileArn）
-    fn transform_api_body(&self, body: &str, ctx: &RequestContext<'_>) -> String;
+    /// 对已序列化的 API 请求体做端点特有加工（如注入 profileArn、wire-order 重整）
+    fn transform_api_body(&self, body: &str, ctx: &RequestContext<'_>) -> anyhow::Result<String>;
 
     /// 对已序列化的 MCP 请求体做端点特有加工（默认不变）
-    fn transform_mcp_body(&self, body: &str, _ctx: &RequestContext<'_>) -> String {
-        body.to_string()
+    fn transform_mcp_body(&self, body: &str, _ctx: &RequestContext<'_>) -> anyhow::Result<String> {
+        Ok(body.to_string())
     }
+
+    /// 构造 `getUsageLimits` 请求所需的 URL 与端点特有头部
+    ///
+    /// caller 应在此基础上追加 Authorization 与凭据无关头，并以 GET 方式发送。
+    /// 当前 upstream caller 还未接入（直接用硬编码 URL），方法已就位供阶段 4 重构使用。
+    #[allow(dead_code)] // 阶段 2 引入，阶段 4 重构 token_manager 时接入
+    fn usage_request_parts(&self, ctx: &RequestContext<'_>) -> anyhow::Result<UsageRequestParts>;
 
     /// 判断响应体是否表示"月度配额用尽"（禁用凭据并转移）
     fn is_monthly_request_limit(&self, body: &str) -> bool {

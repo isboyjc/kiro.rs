@@ -193,23 +193,38 @@ git checkout work/integrate-feature
 
 **目标**：把 feature 的 `cli.rs` endpoint 接入 upstream 的 endpoint trait 注册表。
 
-**关键问题**：trait 签名不一致。
-- upstream `transform_api_body` 返回 `String`
-- feature 返回 `anyhow::Result<String>`
+**两侧仓库现状差异**：
 
-**采用方式 A**：升级 upstream 的 trait 到 `anyhow::Result<String>`。`ide.rs` 实现里把现有 `String` 包成 `Ok(...)`。
+1. **Trait 签名**：upstream 的 `transform_api_body` 返回 `String`，feature 返回 `anyhow::Result<String>`；feature 还新增了 `usage_request_parts` 方法 + `UsageRequestParts` struct，upstream 无。
+2. **`IdeEndpoint` 实现**：feature 版已包含 SSO OIDC 凭据（`builder-id`/`idc`）的 profileArn 区分逻辑（功能上是 upstream 的超集）。
+3. **`CliEndpoint`**：feature 独占，字节级对齐 kiro-cli 2.3.0 抓包（AWS JSON 1.0 framing、KIRO_CLI origin、context entry 包装、envState 注入、wire-order 重整）。
+4. **`ToolSpecification` 字段顺序** ⚠️：feature 把 `input_schema` 调到了 `name`/`description` 之前以匹配 kiro-cli 2.3.0 wire，upstream 是自然顺序——CLI endpoint 对此敏感。
+
+**采用方式 A**：升级 upstream 的 trait 到 `anyhow::Result<String>`，一次性引入 `UsageRequestParts`（即便当前无 caller，阶段 4 重构 token_manager 时可直接用）。
 
 | 文件 | 操作 |
 |---|---|
-| `src/kiro/endpoint/mod.rs` | 修改 trait 签名 + `pub use cli::CliEndpoint` |
-| `src/kiro/endpoint/cli.rs` | 复制 feature 版本 |
-| `src/kiro/endpoint/ide.rs` | `transform_api_body` 实现包 `Ok(...)` |
-| `src/main.rs` | endpoints HashMap 注册时加入 `CliEndpoint` |
-| 所有 trait 调用点 | 加 `?` 或处理 `Result` |
+| `src/kiro/endpoint/mod.rs` | trait 签名升级；新增 `UsageRequestParts` struct 与 `usage_request_parts` 方法；`pub mod cli;` + `pub use cli::{CLI_ENDPOINT_NAME, CliEndpoint};` |
+| `src/kiro/endpoint/ide.rs` | 用 feature 版本主体替换；保留 upstream 4 个 `inject_profile_arn` 单元测试并适配新 Result 签名 |
+| `src/kiro/endpoint/cli.rs` | 从 feature 完整复制（~340 行） |
+| `src/kiro/model/requests/tool.rs` | **同步 feature 的 `ToolSpecification` 字段顺序**（`input_schema` 前置）；保留 upstream 现有所有测试 |
+| `src/kiro/provider.rs` (2 处) | `transform_*_body` 调用加 `?` 或 `unwrap_or_else(|_| body.to_string())` 兜底 |
+| `src/main.rs` | endpoints HashMap 注册 `CliEndpoint` |
+| `Cargo.toml` | 若缺则补 `chrono`（CLI endpoint 用） |
 
-**验证**：现有 IDE 凭据走 IDE 端点正常；CLI 凭据走 CLI 端点正常。
+**不做的事**（避免阶段 2 蔓延）：
+- ❌ 不改 Config 为 `Arc<RwLock<Config>>`（阶段 5）
+- ❌ 不改 `cred.effective_endpoint_name()` 调用方式（保留 upstream 现有写法）
+- ❌ 不动 provider.rs 除两处 caller 之外的任何逻辑
+- ❌ 不接入 `usage_request_parts` 的 caller（阶段 4）
 
-**预估**：1 天。
+**验证**：
+- `cargo check` / `cargo test` 通过（新增测试不减少 baseline 通过数）
+- IDE 凭据走 IDE 端点行为与合并前一致（特别是 builder-id/idc 凭据请求体不含 profileArn）
+- 准备一份 `endpoint: "cli"` 凭据，走 CLI 协议返回 200
+- Tool 序列化输出验证：JSON 字段顺序应为 `inputSchema → name → description`
+
+**预估**：1.5 天。
 
 ### 阶段 3：Anthropic 数据面（cache + 压缩 + 图片）
 
@@ -355,3 +370,4 @@ git checkout work/integrate-feature
 |---|---|---|
 | 2026-05-19 | 0 | 撰写本文档 |
 | 2026-05-19 | 1 | 移植 utf8 / redact / truncation / tool_compression |
+| 2026-05-19 | 2 | 移植 CLI endpoint；升级 trait 签名为 `Result<String>`；新增 `UsageRequestParts`；`ToolSpecification` 字段顺序对齐 kiro-cli 2.3.0 wire |

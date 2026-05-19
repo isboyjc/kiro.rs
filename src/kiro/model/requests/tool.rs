@@ -16,16 +16,21 @@ pub struct Tool {
 
 /// 工具规范
 ///
-/// 定义工具的名称、描述和输入模式
+/// 定义工具的名称、描述和输入模式。
+///
+/// Field declaration order matches kiro-cli 2.3.0 wire (Q_LOG_LEVEL=trace
+/// 2026-05-12):  inputSchema, name, description  (not the more natural
+/// name/description/inputSchema). serde 按 struct 声明顺序序列化字段，
+/// kiro-cli endpoint 对此顺序敏感（错误的顺序会被服务端 400）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolSpecification {
+    /// 输入模式（JSON Schema）
+    pub input_schema: InputSchema,
     /// 工具名称
     pub name: String,
     /// 工具描述
     pub description: String,
-    /// 输入模式（JSON Schema）
-    pub input_schema: InputSchema,
 }
 
 /// 输入模式
@@ -188,5 +193,31 @@ mod tests {
     fn test_input_schema_default() {
         let schema = InputSchema::default();
         assert_eq!(schema.json["type"], "object");
+    }
+
+    /// CLI endpoint 对 Tool 序列化字段顺序敏感（kiro-cli 2.3.0 wire 抓包对齐）：
+    /// 必须为 `inputSchema` → `name` → `description`。本测试守住该顺序，
+    /// 任何字段重排都应优先评估是否破坏 CLI 端 wire 兼容性。
+    #[test]
+    fn test_tool_specification_field_order_for_cli_wire() {
+        let tool = Tool {
+            tool_specification: ToolSpecification {
+                input_schema: InputSchema::from_json(serde_json::json!({"type":"object"})),
+                name: "read_file".to_string(),
+                description: "reads a file from disk".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&tool).unwrap();
+        let input_schema_pos = json.find("\"inputSchema\"").expect("missing inputSchema");
+        let name_pos = json.find("\"name\"").expect("missing name");
+        let description_pos = json.find("\"description\"").expect("missing description");
+        assert!(
+            input_schema_pos < name_pos,
+            "inputSchema 必须在 name 之前 (wire-order): got {json}"
+        );
+        assert!(
+            name_pos < description_pos,
+            "name 必须在 description 之前 (wire-order): got {json}"
+        );
     }
 }

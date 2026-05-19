@@ -163,7 +163,16 @@ impl KiroProvider {
             };
 
             let url = endpoint.mcp_url(&rctx);
-            let body = endpoint.transform_mcp_body(request_body, &rctx);
+            let body = endpoint
+                .transform_mcp_body(request_body, &rctx)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        endpoint = endpoint.name(),
+                        error = %e,
+                        "transform_mcp_body 失败，回退到原 body"
+                    );
+                    request_body.to_string()
+                });
 
             let base = self
                 .client_for(&ctx.credentials)?
@@ -320,7 +329,16 @@ impl KiroProvider {
             };
 
             let url = endpoint.api_url(&rctx);
-            let body = endpoint.transform_api_body(request_body, &rctx);
+            let body = endpoint
+                .transform_api_body(request_body, &rctx)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        endpoint = endpoint.name(),
+                        error = %e,
+                        "transform_api_body 失败，回退到原 body"
+                    );
+                    request_body.to_string()
+                });
 
             let base = self
                 .client_for(&ctx.credentials)?
