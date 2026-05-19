@@ -10,8 +10,9 @@ import {
   deleteCredential,
   getLoadBalancingMode,
   setLoadBalancingMode,
+  importTokenJson,
 } from '@/api/credentials'
-import type { AddCredentialRequest } from '@/types/api'
+import type { AddCredentialRequest, ImportTokenJsonRequest } from '@/types/api'
 
 // 查询凭据列表
 export function useCredentials() {
@@ -115,6 +116,17 @@ export function useSetLoadBalancingMode() {
     mutationFn: setLoadBalancingMode,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['loadBalancingMode'] })
+    },
+  })
+}
+
+// === 阶段 5.3 批量导入 hook ===
+export function useImportTokenJson() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (req: ImportTokenJsonRequest) => importTokenJson(req),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
     },
   })
 }

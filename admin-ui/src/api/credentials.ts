@@ -8,6 +8,8 @@ import type {
   SetPriorityRequest,
   AddCredentialRequest,
   AddCredentialResponse,
+  ImportTokenJsonRequest,
+  ImportTokenJsonResponse,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -102,5 +104,16 @@ export async function getLoadBalancingMode(): Promise<{ mode: 'priority' | 'bala
 // 设置负载均衡模式
 export async function setLoadBalancingMode(mode: 'priority' | 'balanced'): Promise<{ mode: 'priority' | 'balanced' }> {
   const { data } = await api.put<{ mode: 'priority' | 'balanced' }>('/config/load-balancing', { mode })
+  return data
+}
+
+// === 阶段 5.3 批量导入 ===
+export async function importTokenJson(
+  req: ImportTokenJsonRequest
+): Promise<ImportTokenJsonResponse> {
+  const { data } = await api.post<ImportTokenJsonResponse>(
+    '/credentials/import-token-json',
+    req
+  )
   return data
 }
