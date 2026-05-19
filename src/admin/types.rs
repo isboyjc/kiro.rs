@@ -178,6 +178,36 @@ pub struct BalanceResponse {
     pub next_reset_at: Option<f64>,
 }
 
+/// 单个凭据的缓存余额条目（用于 GET /credentials/balances/cached）
+///
+/// 仅从 AdminService 的磁盘缓存（`kiro_balance_cache.json`）读取，
+/// 不触发任何上游请求，保证不影响号池核心路径。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedBalanceItem {
+    /// 凭据 ID
+    pub id: u64,
+    /// 缓存的剩余额度
+    pub remaining: f64,
+    /// 使用限额
+    pub usage_limit: f64,
+    /// 使用百分比
+    pub usage_percentage: f64,
+    /// 订阅类型
+    pub subscription_title: Option<String>,
+    /// 缓存写入时间（Unix 毫秒）
+    pub cached_at: u64,
+    /// 缓存存活时间（秒），前端用 `cached_at + ttl_secs * 1000` 计算到期时刻
+    pub ttl_secs: u64,
+}
+
+/// `GET /credentials/balances/cached` 响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedBalancesResponse {
+    pub balances: Vec<CachedBalanceItem>,
+}
+
 // ============ 负载均衡配置 ============
 
 /// 负载均衡模式响应

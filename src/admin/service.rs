@@ -15,11 +15,11 @@ use crate::model::config::CompressionConfig;
 
 use super::error::AdminServiceError;
 use super::types::{
-    AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem,
-    CredentialsStatusResponse, ImportAction, ImportItemResult, ImportSummary,
-    ImportTokenJsonRequest, ImportTokenJsonResponse, LoadBalancingModeResponse,
-    PromptCacheConfigResponse, SetLoadBalancingModeRequest, TokenJsonItem,
-    UpdatePromptCacheConfigRequest,
+    AddCredentialRequest, AddCredentialResponse, BalanceResponse, CachedBalanceItem,
+    CachedBalancesResponse, CredentialStatusItem, CredentialsStatusResponse, ImportAction,
+    ImportItemResult, ImportSummary, ImportTokenJsonRequest, ImportTokenJsonResponse,
+    LoadBalancingModeResponse, PromptCacheConfigResponse, SetLoadBalancingModeRequest,
+    TokenJsonItem, UpdatePromptCacheConfigRequest,
 };
 
 /// 余额缓存过期时间（秒），5 分钟
@@ -426,6 +426,28 @@ impl AdminService {
             usage_percentage,
             next_reset_at: usage.next_date_reset,
         })
+    }
+
+    /// 读取所有凭据的缓存余额快照（不触发任何上游请求）
+    ///
+    /// 阶段 5.3c：纯读 AdminService 已有的磁盘缓存（由 `get_balance` 写入），
+    /// 不访问 token_manager 选号路径、不持锁号池关键字段，对号池零影响。
+    pub fn get_cached_balances(&self) -> CachedBalancesResponse {
+        let cache = self.balance_cache.lock();
+        let ttl_secs = BALANCE_CACHE_TTL_SECS.max(0) as u64;
+        let balances = cache
+            .iter()
+            .map(|(id, cached)| CachedBalanceItem {
+                id: *id,
+                remaining: cached.data.remaining,
+                usage_limit: cached.data.usage_limit,
+                usage_percentage: cached.data.usage_percentage,
+                subscription_title: cached.data.subscription_title.clone(),
+                cached_at: (cached.cached_at * 1000.0).max(0.0) as u64,
+                ttl_secs,
+            })
+            .collect();
+        CachedBalancesResponse { balances }
     }
 
     /// 添加新凭据

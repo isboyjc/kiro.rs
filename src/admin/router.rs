@@ -8,10 +8,10 @@ use axum::{
 use super::{
     handlers::{
         add_credential, delete_credential, force_refresh_token, get_all_credentials,
-        get_compression_config, get_credential_balance, get_load_balancing_mode,
-        get_prompt_cache_config, import_token_json, reset_failure_count,
-        set_credential_disabled, set_credential_priority, set_load_balancing_mode,
-        update_compression_config, update_prompt_cache_config,
+        get_cached_balances, get_compression_config, get_credential_balance,
+        get_load_balancing_mode, get_prompt_cache_config, import_token_json,
+        reset_failure_count, set_credential_disabled, set_credential_priority,
+        set_load_balancing_mode, update_compression_config, update_prompt_cache_config,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -27,6 +27,7 @@ use super::{
 /// - `POST /credentials/:id/reset` - 重置失败计数
 /// - `POST /credentials/:id/refresh` - 强制刷新 Token
 /// - `GET /credentials/:id/balance` - 获取凭据余额
+/// - `GET /credentials/balances/cached` - 读取所有凭据的缓存余额（不触发上游请求）
 /// - `GET /config/load-balancing` - 获取负载均衡模式
 /// - `PUT /config/load-balancing` - 设置负载均衡模式
 ///
@@ -42,6 +43,8 @@ pub fn create_admin_router(state: AdminState) -> Router {
         )
         // 阶段 5.3a 批量导入端点
         .route("/credentials/import-token-json", post(import_token_json))
+        // 阶段 5.3c 缓存余额汇总端点（静态路径需先于 `/credentials/{id}/...` 注册）
+        .route("/credentials/balances/cached", get(get_cached_balances))
         .route("/credentials/{id}", delete(delete_credential))
         .route("/credentials/{id}/disabled", post(set_credential_disabled))
         .route("/credentials/{id}/priority", post(set_credential_priority))
