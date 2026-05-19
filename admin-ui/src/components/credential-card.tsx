@@ -213,12 +213,58 @@ export function CredentialCard({
   const hasFailures = credential.failureCount > 0 || credential.refreshFailureCount > 0
 
   const effectiveBalance = balance
-    ? { remaining: balance.remaining, limit: balance.usageLimit, pct: balance.usagePercentage, cached: false, age: 0 }
+    ? {
+        remaining: balance.remaining,
+        limit: balance.usageLimit,
+        pct: balance.usagePercentage,
+        cached: false,
+        age: 0,
+        isOverage: Boolean(balance.isOverage),
+      }
     : cachedBalance && cachedBalance.usageLimit > 0
-      ? { remaining: cachedBalance.remaining, limit: cachedBalance.usageLimit, pct: cachedBalance.usagePercentage, cached: true, age: cachedBalance.cachedAt }
+      ? {
+          remaining: cachedBalance.remaining,
+          limit: cachedBalance.usageLimit,
+          pct: cachedBalance.usagePercentage,
+          cached: true,
+          age: cachedBalance.cachedAt,
+          isOverage: Boolean(cachedBalance.isOverage),
+        }
       : null
 
-  const usagePctRemaining = effectiveBalance ? Math.max(0, 100 - effectiveBalance.pct) : null
+  // 阶段 7.12：剩余百分比（不再 clamp，可负数表示超额比例）
+  const usagePctRemaining = effectiveBalance ? 100 - effectiveBalance.pct : null
+  // 阶梯色 + 超额：紫 / 红 / 黄 / 绿
+  const balanceTone: 'overage' | 'red' | 'amber' | 'green' | null = (() => {
+    if (!effectiveBalance) return null
+    if (effectiveBalance.isOverage || usagePctRemaining! < 0) return 'overage'
+    if (usagePctRemaining! < 20) return 'red'
+    if (usagePctRemaining! < 50) return 'amber'
+    return 'green'
+  })()
+  const balanceBarColor =
+    balanceTone === 'overage'
+      ? 'bg-purple-500'
+      : balanceTone === 'red'
+        ? 'bg-red-500'
+        : balanceTone === 'amber'
+          ? 'bg-amber-500'
+          : 'bg-green-500'
+  const balanceTextColor =
+    balanceTone === 'overage'
+      ? 'text-purple-600 dark:text-purple-400'
+      : balanceTone === 'red'
+        ? 'text-red-600 dark:text-red-400'
+        : balanceTone === 'amber'
+          ? 'text-amber-600 dark:text-amber-400'
+          : 'text-foreground'
+  // 进度条宽度：超额时显示满格 + 视觉提示；正常时按使用百分比
+  const balanceBarWidth = effectiveBalance
+    ? Math.min(100, Math.max(2, effectiveBalance.pct))
+    : 0
+  const overageAmount = effectiveBalance && effectiveBalance.isOverage
+    ? Math.max(0, -effectiveBalance.remaining)
+    : 0
 
   return (
     <>
@@ -258,6 +304,16 @@ export function CredentialCard({
                 )}
                 {credential.hasProfileArn && (
                   <Badge variant="secondary" className="h-4 px-1.5 text-[10px]" title="包含 Profile ARN">ARN</Badge>
+                )}
+                {/* 阶段 7.12：超额徽章 */}
+                {effectiveBalance?.isOverage && !credential.disabled && (
+                  <Badge
+                    variant="outline"
+                    className="h-4 px-1.5 text-[10px] border-purple-500/40 text-purple-600 bg-purple-500/10"
+                    title={`已超额 $${overageAmount.toFixed(2)}（订阅范围内凭据优先调用）`}
+                  >
+                    超额中
+                  </Badge>
                 )}
                 {credential.disabled && (
                   <Badge variant="destructive" className="h-4 px-1.5 text-[10px]">已禁用</Badge>
@@ -339,13 +395,15 @@ export function CredentialCard({
                   <Loader2 className="inline w-3 h-3 animate-spin" />
                 ) : effectiveBalance ? (
                   <>
-                    <span className="text-foreground font-medium">
-                      ${effectiveBalance.remaining.toFixed(2)}
+                    <span className={`font-medium ${balanceTextColor}`}>
+                      {effectiveBalance.remaining < 0 ? '-' : ''}${Math.abs(effectiveBalance.remaining).toFixed(2)}
                     </span>
                     <span className="text-muted-foreground/80"> / ${effectiveBalance.limit.toFixed(2)}</span>
-                    <span className={`ml-1 ${usagePctRemaining! < 20 ? 'text-amber-600' : 'text-muted-foreground'}`}>
-                      ({usagePctRemaining!.toFixed(0)}%
-                      {effectiveBalance.cached && <> · {formatCacheAge(effectiveBalance.age)}前</>})
+                    <span className={`ml-1 ${balanceTextColor}`}>
+                      ({effectiveBalance.isOverage
+                        ? `超 ${Math.max(0, effectiveBalance.pct - 100).toFixed(0)}%`
+                        : `${Math.max(0, usagePctRemaining!).toFixed(0)}% 剩`}
+                      {effectiveBalance.cached && <span className="text-muted-foreground"> · {formatCacheAge(effectiveBalance.age)}前</span>})
                     </span>
                   </>
                 ) : (
@@ -355,14 +413,16 @@ export function CredentialCard({
             </div>
           </div>
 
-          {/* 用量进度条 */}
+          {/* 阶梯色用量进度条（绿/黄/红/紫 4 档）*/}
           {effectiveBalance && (
-            <div className="h-1 rounded-full bg-muted overflow-hidden">
+            <div className={`h-1 rounded-full overflow-hidden ${
+              balanceTone === 'overage' ? 'bg-purple-500/20' : 'bg-muted'
+            }`}>
               <div
-                className={`h-full transition-all ${
-                  usagePctRemaining! < 20 ? 'bg-amber-500' : usagePctRemaining! < 50 ? 'bg-primary' : 'bg-green-500'
+                className={`h-full transition-all ${balanceBarColor} ${
+                  balanceTone === 'overage' ? 'animate-pulse' : ''
                 }`}
-                style={{ width: `${Math.max(2, usagePctRemaining!)}%` }}
+                style={{ width: `${balanceBarWidth}%` }}
               />
             </div>
           )}

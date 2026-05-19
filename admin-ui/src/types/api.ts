@@ -166,12 +166,16 @@ export interface LogsQueryParams {
 // 缓存余额条目（来自 GET /credentials/balances/cached，纯磁盘缓存快照）
 export interface CachedBalanceInfo {
   id: number
+  /** 阶段 7.12：可能为负数 */
   remaining: number
   usageLimit: number
+  /** 可超过 100% */
   usagePercentage: number
   subscriptionTitle: string | null
   cachedAt: number // Unix 毫秒
   ttlSecs: number
+  /** 阶段 7.12：是否处于超额区 */
+  isOverage?: boolean
 }
 
 // 所有凭据的缓存余额响应
@@ -185,9 +189,13 @@ export interface BalanceResponse {
   subscriptionTitle: string | null
   currentUsage: number
   usageLimit: number
+  /** 阶段 7.12：可能为负数（表示已超额 |remaining|） */
   remaining: number
+  /** 可超过 100% */
   usagePercentage: number
   nextResetAt: number | null
+  /** 阶段 7.12：是否处于超额区（current >= limit 且 limit > 0） */
+  isOverage?: boolean
 }
 
 // 成功响应
