@@ -106,6 +106,61 @@ export interface ConfigSchemaResponse {
   groups: ConfigSchemaGroup[]
 }
 
+// === 阶段 7.9：日志面板 ===
+
+export type LogKind = 'generic' | 'model_call'
+
+export interface ModelCallMeta {
+  credentialId: number
+  model?: string
+  endpoint: string
+  apiType: string
+  status: number
+  durationMs: number
+  retryAttempt: number
+  isStream: boolean
+  errorSummary?: string
+}
+
+export interface LogEntry {
+  timestamp: number // Unix ms
+  level: string // INFO / WARN / ERROR
+  kind: LogKind
+  target: string
+  message: string
+  fields: Record<string, string>
+  modelCall?: ModelCallMeta
+}
+
+export interface ModelCallStats {
+  windowMs: number
+  total: number
+  success: number
+  failed: number
+  avgMs: number
+  p95Ms: number
+}
+
+export interface LogsResponse {
+  entries: LogEntry[]
+  totalBuffered: number
+  capacity: number
+  stats: ModelCallStats
+}
+
+export interface LogsQueryParams {
+  kind?: LogKind | 'all'
+  /** 逗号分隔，如 "WARN,ERROR" */
+  levels?: string
+  q?: string
+  credentialId?: number
+  model?: string
+  status?: number
+  onlyFailed?: boolean
+  since?: number
+  limit?: number
+}
+
 // 缓存余额条目（来自 GET /credentials/balances/cached，纯磁盘缓存快照）
 export interface CachedBalanceInfo {
   id: number

@@ -2,7 +2,7 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::IntoResponse,
 };
 
@@ -246,6 +246,22 @@ pub async fn get_config_raw(State(state): State<AdminState>) -> impl IntoRespons
 /// 字段元数据（前端按此渲染可视化表单）
 pub async fn get_config_schema(State(state): State<AdminState>) -> impl IntoResponse {
     Json(state.service.get_config_schema())
+}
+
+// ============ 阶段 7.9：日志面板 ============
+
+/// GET /api/admin/logs
+pub async fn get_logs(
+    State(state): State<AdminState>,
+    Query(params): Query<crate::admin::service::LogsQueryParams>,
+) -> impl IntoResponse {
+    Json(state.service.query_logs(params.into_filter()))
+}
+
+/// DELETE /api/admin/logs
+pub async fn clear_logs(State(state): State<AdminState>) -> impl IntoResponse {
+    state.service.clear_logs();
+    Json(SuccessResponse::new("日志缓冲已清空"))
 }
 
 /// POST /api/admin/config/validate

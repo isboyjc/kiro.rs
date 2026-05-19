@@ -9,6 +9,7 @@ use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::anthropic::PromptCacheRuntime;
+use crate::common::log_ring::{LogEntry, LogFilter, LogKind, LogRing, ModelCallStats};
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::token_manager::MultiTokenManager;
 use crate::model::config::CompressionConfig;
@@ -60,6 +61,8 @@ pub struct AdminService {
     config_path: PathBuf,
     /// 阶段 7：串行化 PUT /config 写流程，防并发覆盖
     config_write_lock: Mutex<()>,
+    /// 阶段 7.9：日志环形缓冲（与 main.rs tracing layer 共用同一实例）
+    log_ring: Arc<LogRing>,
 }
 
 impl AdminService {
@@ -73,6 +76,7 @@ impl AdminService {
         admin_api_key_shared: Arc<RwLock<String>>,
         extract_thinking_shared: Arc<RwLock<bool>>,
         config_path: PathBuf,
+        log_ring: Arc<LogRing>,
     ) -> Self {
         let cache_path = token_manager
             .cache_dir()
@@ -92,6 +96,7 @@ impl AdminService {
             extract_thinking_shared,
             config_path,
             config_write_lock: Mutex::new(()),
+            log_ring,
         }
     }
 
@@ -834,6 +839,35 @@ impl AdminService {
         build_config_schema()
     }
 
+    // ============ 阶段 7.9：日志查询 ============
+    // 类型定义（用于本节方法签名）见本文件底部 LogsResponse 等。
+    // 这里直接 use crate-internal scope。
+
+
+    /// `GET /admin/logs` — 查询日志环形缓冲
+    pub fn query_logs(&self, filter: LogFilter) -> LogsResponse {
+        let entries = self.log_ring.query(&filter);
+        let total = self.log_ring.len();
+        // 默认窗口 5 分钟统计
+        let stats = self.log_ring.model_call_stats(5 * 60_000);
+        LogsResponse {
+            entries,
+            total_buffered: total,
+            capacity: self.log_ring.capacity(),
+            stats,
+        }
+    }
+
+    /// `DELETE /admin/logs` — 清空缓冲
+    pub fn clear_logs(&self) {
+        self.log_ring.clear();
+    }
+
+    /// 拿一份 Arc<LogRing> 给 provider 用于追加 ModelCall 记录
+    pub fn log_ring(&self) -> Arc<LogRing> {
+        self.log_ring.clone()
+    }
+
     /// `GET /config/raw` — 返回原始 JSON 文本
     pub fn get_config_raw(&self) -> Result<ConfigRawResponse, AdminServiceError> {
         let content = std::fs::read_to_string(&self.config_path).map_err(|e| {
@@ -937,6 +971,13 @@ impl AdminService {
                 new_config.credential_rpm,
                 new_config.daily_max_requests,
             );
+        }
+        if new_config.log_buffer_capacity != old_config.log_buffer_capacity {
+            let cap = new_config
+                .log_buffer_capacity
+                .unwrap_or(crate::common::log_ring::DEFAULT_LOG_CAPACITY);
+            self.log_ring.resize(cap);
+            tracing::info!(capacity = cap, "日志缓冲容量已热更新");
         }
 
         // 鉴权类热轮换（即使在 needs_restart 集合外，也立刻生效）
@@ -1044,6 +1085,7 @@ fn diff_config_fields(old: &Config, new: &Config) -> (Vec<String>, Vec<String>) 
     diff!(extract_thinking, "extractThinking", hot);
     diff!(credential_rpm, "credentialRpm", hot);
     diff!(daily_max_requests, "dailyMaxRequests", hot);
+    diff!(log_buffer_capacity, "logBufferCapacity", hot);
     // 鉴权类：通过 RwLock 热轮换
     diff!(api_key, "apiKey", hot);
     diff!(admin_api_key, "adminApiKey", hot);
@@ -1306,6 +1348,19 @@ fn build_config_schema() -> ConfigSchemaResponse {
                     )
                 },
                 ConfigSchemaField {
+                    nullable: true,
+                    min: Some(1000.0),
+                    max: Some(500_000.0),
+                    placeholder: Some(s("留空 = 50000 (~25 MB 内存)")),
+                    ..field(
+                        "logBufferCapacity",
+                        "日志缓冲容量",
+                        "number",
+                        false,
+                        "Admin 日志面板的内存环形缓冲条数。每条约 500 字节。50000 ≈ 25 MB；200000 ≈ 100 MB。调小立刻挤出最旧条目；调大不会回填历史",
+                    )
+                },
+                ConfigSchemaField {
                     default_value: Some(json!(true)),
                     needs_restart: false,
                     ..field("extractThinking", "提取 thinking 块", "boolean", false, "非流式响应中解析 <thinking>")
@@ -1432,4 +1487,64 @@ fn build_config_schema() -> ConfigSchemaResponse {
     ];
 
     ConfigSchemaResponse { groups }
+}
+
+// ============================================================================
+// 阶段 7.9：日志查询 DTO
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogsResponse {
+    pub entries: Vec<LogEntry>,
+    /// 当前 buffer 内总条数（未过滤前）
+    pub total_buffered: usize,
+    /// buffer 容量
+    pub capacity: usize,
+    /// 最近 5 分钟 ModelCall 统计
+    pub stats: ModelCallStats,
+}
+
+/// `GET /admin/logs` 查询参数（query string）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogsQueryParams {
+    /// generic / model_call / all
+    pub kind: Option<String>,
+    /// 等级过滤，逗号分隔（如 "WARN,ERROR"）
+    pub levels: Option<String>,
+    pub q: Option<String>,
+    pub credential_id: Option<u64>,
+    pub model: Option<String>,
+    pub status: Option<u16>,
+    pub only_failed: Option<bool>,
+    pub since: Option<i64>,
+    pub limit: Option<usize>,
+}
+
+impl LogsQueryParams {
+    pub fn into_filter(self) -> LogFilter {
+        let kind = self.kind.and_then(|k| match k.as_str() {
+            "model_call" | "modelCall" => Some(LogKind::ModelCall),
+            "generic" => Some(LogKind::Generic),
+            _ => None,
+        });
+        let levels = self.levels.map(|s| {
+            s.split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect()
+        });
+        LogFilter {
+            kind,
+            levels,
+            q: self.q,
+            credential_id: self.credential_id,
+            model: self.model,
+            status: self.status,
+            only_failed: self.only_failed.unwrap_or(false),
+            since: self.since,
+            limit: self.limit.unwrap_or(200).min(2000),
+        }
+    }
 }

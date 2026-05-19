@@ -44,6 +44,8 @@ pub struct KiroProvider {
     endpoints: HashMap<String, Arc<dyn KiroEndpoint>>,
     /// 默认端点名称（凭据未指定 endpoint 时使用）
     default_endpoint: String,
+    /// 阶段 7.9：日志环形缓冲，每次 call 完成后追加一条 ModelCall 记录（可选注入）
+    log_ring: Option<Arc<crate::common::log_ring::LogRing>>,
 }
 
 impl KiroProvider {
@@ -79,7 +81,77 @@ impl KiroProvider {
             tls_backend,
             endpoints,
             default_endpoint,
+            log_ring: None,
         }
+    }
+
+    /// 阶段 7.9：注入日志环形缓冲（必须在 admin 模块创建后调用）
+    pub fn with_log_ring(mut self, ring: Arc<crate::common::log_ring::LogRing>) -> Self {
+        self.log_ring = Some(ring);
+        self
+    }
+
+    /// 阶段 7.9：追加一条 ModelCall 记录到日志环形缓冲（若已注入）
+    fn record_model_call(
+        &self,
+        credential_id: u64,
+        model: Option<String>,
+        endpoint_name: &str,
+        api_type: &str,
+        status: u16,
+        duration_ms: u32,
+        retry_attempt: u32,
+        is_stream: bool,
+        error_summary: Option<String>,
+    ) {
+        let ring = match &self.log_ring {
+            Some(r) => r,
+            None => return,
+        };
+        let level = if status >= 400 || status == 0 {
+            "ERROR"
+        } else {
+            "INFO"
+        };
+        let summary_body = error_summary
+            .as_deref()
+            .map(|s| {
+                let trimmed = s.trim();
+                if trimmed.len() > 200 {
+                    format!("{}...", &trimmed[..crate::common::utf8::floor_char_boundary(trimmed, 200)])
+                } else {
+                    trimmed.to_string()
+                }
+            });
+        let model_disp = model.as_deref().unwrap_or("<no-model>");
+        let message = if status > 0 && status < 400 {
+            format!("#{} → {} {} {}ms", credential_id, model_disp, status, duration_ms)
+        } else if status == 0 {
+            format!("#{} → {} 网络错误 {}ms", credential_id, model_disp, duration_ms)
+        } else {
+            format!("#{} → {} {} {}ms", credential_id, model_disp, status, duration_ms)
+        };
+
+        let entry = crate::common::log_ring::LogEntry {
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            level: level.to_string(),
+            kind: crate::common::log_ring::LogKind::ModelCall,
+            target: "kiro::call".to_string(),
+            message,
+            fields: std::collections::HashMap::new(),
+            model_call: Some(crate::common::log_ring::ModelCallMeta {
+                credential_id,
+                model,
+                endpoint: endpoint_name.to_string(),
+                api_type: api_type.to_string(),
+                status,
+                duration_ms,
+                retry_attempt,
+                is_stream,
+                error_summary: summary_body,
+            }),
+        };
+        ring.push(entry);
     }
 
     /// 根据凭据的代理配置获取（或创建并缓存）对应的 reqwest::Client
@@ -183,14 +255,31 @@ impl KiroProvider {
                 .header("Connection", "close");
             let request = endpoint.decorate_mcp(base, &rctx);
 
+            // 阶段 7.9：记录 ModelCall 起始时间
+            let started_at = std::time::Instant::now();
+            let endpoint_name_owned = endpoint.name().to_string();
+
             let response = match request.send().await {
                 Ok(resp) => resp,
                 Err(e) => {
+                    let dur = started_at.elapsed().as_millis() as u32;
+                    let err_msg = e.to_string();
+                    self.record_model_call(
+                        ctx.id,
+                        None,
+                        &endpoint_name_owned,
+                        "mcp",
+                        0,
+                        dur,
+                        attempt as u32,
+                        false,
+                        Some(err_msg.clone()),
+                    );
                     tracing::warn!(
                         "MCP 请求发送失败（尝试 {}/{}）: {}",
                         attempt + 1,
                         max_retries,
-                        e
+                        err_msg
                     );
                     last_error = Some(e.into());
                     if attempt + 1 < max_retries {
@@ -204,12 +293,37 @@ impl KiroProvider {
 
             // 成功响应
             if status.is_success() {
+                let dur = started_at.elapsed().as_millis() as u32;
+                self.record_model_call(
+                    ctx.id,
+                    None,
+                    &endpoint_name_owned,
+                    "mcp",
+                    status.as_u16(),
+                    dur,
+                    attempt as u32,
+                    false,
+                    None,
+                );
                 self.token_manager.report_success(ctx.id);
                 return Ok(response);
             }
 
             // 失败响应
             let body = response.text().await.unwrap_or_default();
+            let dur = started_at.elapsed().as_millis() as u32;
+            // 失败状态码统一记录一条
+            self.record_model_call(
+                ctx.id,
+                None,
+                &endpoint_name_owned,
+                "mcp",
+                status.as_u16(),
+                dur,
+                attempt as u32,
+                false,
+                Some(body.clone()),
+            );
 
             // 402 额度用尽
             if status.as_u16() == 402 && endpoint.is_monthly_request_limit(&body) {
@@ -359,14 +473,32 @@ impl KiroProvider {
                 .header("Connection", "close");
             let request = endpoint.decorate_api(base, &rctx);
 
+            // 阶段 7.9：记录起始时间
+            let started_at = std::time::Instant::now();
+            let endpoint_name_owned = endpoint.name().to_string();
+            let api_kind = if is_stream { "anthropic_stream" } else { "anthropic" };
+
             let response = match request.send().await {
                 Ok(resp) => resp,
                 Err(e) => {
+                    let dur = started_at.elapsed().as_millis() as u32;
+                    let err_msg = e.to_string();
+                    self.record_model_call(
+                        ctx.id,
+                        model.clone(),
+                        &endpoint_name_owned,
+                        api_kind,
+                        0,
+                        dur,
+                        attempt as u32,
+                        is_stream,
+                        Some(err_msg.clone()),
+                    );
                     tracing::warn!(
                         "API 请求发送失败（尝试 {}/{}）: {}",
                         attempt + 1,
                         max_retries,
-                        e
+                        err_msg
                     );
                     // 网络错误通常是上游/链路瞬态问题，不应导致"禁用凭据"或"切换凭据"
                     // （否则一段时间网络抖动会把所有凭据都误禁用，需要重启才能恢复）
@@ -382,12 +514,36 @@ impl KiroProvider {
 
             // 成功响应
             if status.is_success() {
+                let dur = started_at.elapsed().as_millis() as u32;
+                self.record_model_call(
+                    ctx.id,
+                    model.clone(),
+                    &endpoint_name_owned,
+                    api_kind,
+                    status.as_u16(),
+                    dur,
+                    attempt as u32,
+                    is_stream,
+                    None,
+                );
                 self.token_manager.report_success(ctx.id);
                 return Ok(response);
             }
 
             // 失败响应：读取 body 用于日志/错误信息
             let body = response.text().await.unwrap_or_default();
+            let dur = started_at.elapsed().as_millis() as u32;
+            self.record_model_call(
+                ctx.id,
+                model.clone(),
+                &endpoint_name_owned,
+                api_kind,
+                status.as_u16(),
+                dur,
+                attempt as u32,
+                is_stream,
+                Some(body.clone()),
+            );
 
             // 402 Payment Required 且额度用尽：禁用凭据并故障转移
             if status.as_u16() == 402 && endpoint.is_monthly_request_limit(&body) {

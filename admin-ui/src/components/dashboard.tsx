@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
-import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, Trash2, RotateCcw, CheckCircle2, ArrowUp, ArrowDown, Settings, Search, X } from 'lucide-react'
+import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, Trash2, RotateCcw, CheckCircle2, ArrowUp, ArrowDown, Settings, Search, X, FileText } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { storage } from '@/lib/storage'
@@ -11,6 +11,7 @@ import { BalanceDialog } from '@/components/balance-dialog'
 import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { ImportTokenJsonDialog } from '@/components/import-token-json-dialog'
 import { SettingsDialog } from '@/components/settings-dialog'
+import { LogsDialog } from '@/components/logs-dialog'
 import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
 import { useCredentials, useDeleteCredential, useResetFailure, useCachedBalances } from '@/hooks/use-credentials'
 import { getCredentialBalance, forceRefreshToken } from '@/api/credentials'
@@ -31,6 +32,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [addDialogOpen, setAddDialogOpen] = useState(false)
   const [importTokenJsonDialogOpen, setImportTokenJsonDialogOpen] = useState(false)
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false)
+  const [logsDialogOpen, setLogsDialogOpen] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [verifyDialogOpen, setVerifyDialogOpen] = useState(false)
   const [verifying, setVerifying] = useState(false)
@@ -593,6 +595,9 @@ export function Dashboard({ onLogout }: DashboardProps) {
             <span className="font-semibold tracking-tight">Kiro Admin</span>
           </div>
           <div className="flex items-center gap-1">
+            <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setLogsDialogOpen(true)} title="日志查看">
+              <FileText className="h-4 w-4" />
+            </Button>
             <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setSettingsDialogOpen(true)} title="系统配置">
               <Settings className="h-4 w-4" />
             </Button>
@@ -906,6 +911,12 @@ export function Dashboard({ onLogout }: DashboardProps) {
       <SettingsDialog
         open={settingsDialogOpen}
         onOpenChange={setSettingsDialogOpen}
+      />
+
+      {/* 日志查看对话框（阶段 7.9） */}
+      <LogsDialog
+        open={logsDialogOpen}
+        onOpenChange={setLogsDialogOpen}
       />
 
       {/* 批量验活对话框 */}

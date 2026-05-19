@@ -115,6 +115,16 @@ pub struct Config {
     #[serde(default)]
     pub daily_max_requests: Option<u32>,
 
+    /// 内存日志环形缓冲容量 —— 阶段 7.9 引入
+    ///
+    /// admin /api/admin/logs 面板的数据源。容量越大，可回溯的历史越长。
+    /// 每条 ~500 字节，50000 条约 25 MB 内存。
+    ///
+    /// - `None` / `0`：使用默认 50000
+    /// - `>0`：覆盖；调小会立刻挤出最旧条目；调大不会回填历史
+    #[serde(default)]
+    pub log_buffer_capacity: Option<usize>,
+
     /// 是否开启非流式响应的 thinking 块提取（默认 true）
     ///
     /// 启用后，非流式响应中的 `<thinking>...</thinking>` 标签会被解析为
@@ -225,6 +235,7 @@ impl Default for Config {
             load_balancing_mode: default_load_balancing_mode(),
             credential_rpm: None,
             daily_max_requests: None,
+            log_buffer_capacity: None,
             extract_thinking: default_extract_thinking(),
             default_endpoint: default_endpoint(),
             endpoints: HashMap::new(),

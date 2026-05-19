@@ -7,9 +7,9 @@ use axum::{
 
 use super::{
     handlers::{
-        add_credential, delete_credential, force_refresh_token, get_all_credentials,
+        add_credential, clear_logs, delete_credential, force_refresh_token, get_all_credentials,
         get_cached_balances, get_compression_config, get_config, get_config_raw,
-        get_config_schema, get_credential_balance, get_load_balancing_mode,
+        get_config_schema, get_credential_balance, get_load_balancing_mode, get_logs,
         get_prompt_cache_config, import_token_json, reset_failure_count,
         set_credential_disabled, set_credential_endpoint, set_credential_priority,
         set_credential_region, set_load_balancing_mode, update_compression_config,
@@ -73,6 +73,8 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/config/schema", get(get_config_schema))
         .route("/config/validate", post(validate_config))
         .route("/config", get(get_config).put(update_config))
+        // 阶段 7.9：日志面板
+        .route("/logs", get(get_logs).delete(clear_logs))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,

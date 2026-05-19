@@ -430,6 +430,14 @@ pub struct ImportTokenJsonResponse {
     pub items: Vec<ImportItemResult>,
 }
 
+// ============ 阶段 7.9: 调用日志面板 ============
+
+/// `GET /admin/logs` 响应。
+///
+/// `entries` 由 LogRing 序列化（包括 fields HashMap），无需在此重新定义结构。
+/// 直接使用 `crate::common::log_ring::LogEntry` 序列化即可。
+// 类型定义见 src/admin/service.rs 的 LogsResponse
+
 // ============ 阶段 7: 配置面板 ============
 
 /// `GET /config/raw` 响应：返回 config.json 原文

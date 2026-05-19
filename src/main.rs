@@ -24,12 +24,22 @@ async fn main() {
     // 解析命令行参数
     let args = Args::parse();
 
-    // 初始化日志
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    // 阶段 7.9：初始化日志——fmt layer 写 stdout，LogRingLayer 镜像到内存环形缓冲
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use crate::common::log_ring::{LogRing, DEFAULT_LOG_CAPACITY};
+    use crate::common::tracing_layer::LogRingLayer;
+
+    // 占位：实际容量在 config 加载后再 resize
+    let log_ring = std::sync::Arc::new(LogRing::new(DEFAULT_LOG_CAPACITY));
+
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
+        .with(tracing_subscriber::fmt::layer())
+        .with(LogRingLayer::new(log_ring.clone()))
         .init();
 
     // 加载配置
@@ -40,6 +50,11 @@ async fn main() {
         tracing::error!("加载配置失败: {}", e);
         std::process::exit(1);
     });
+
+    // 阶段 7.9：按用户配置 resize 日志缓冲
+    if let Some(cap) = config.log_buffer_capacity.filter(|&v| v > 0) {
+        log_ring.resize(cap);
+    }
 
     // 加载凭证（支持单对象或数组格式）
     let credentials_path = args
@@ -159,7 +174,8 @@ async fn main() {
         proxy_config.clone(),
         endpoints,
         config.default_endpoint.clone(),
-    );
+    )
+    .with_log_ring(log_ring.clone());
 
     // 初始化 count_tokens 配置
     token::init_config(token::CountTokensConfig {
@@ -217,6 +233,7 @@ async fn main() {
                 admin_key_shared.clone(),
                 extract_thinking_shared.clone(),
                 std::path::PathBuf::from(&config_path),
+                log_ring.clone(),
             );
             let admin_state = admin::AdminState::with_shared_key(admin_key_shared, admin_service);
             let admin_app = admin::create_admin_router(admin_state);
