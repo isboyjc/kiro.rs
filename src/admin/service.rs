@@ -1020,6 +1020,22 @@ impl AdminService {
             self.token_manager
                 .update_concurrency_config(new_config.max_concurrent_per_credential);
         }
+        if new_config.global429_enabled != old_config.global429_enabled
+            || new_config.global429_window_ms != old_config.global429_window_ms
+            || new_config.global429_level1_ms != old_config.global429_level1_ms
+            || new_config.global429_level2_ms != old_config.global429_level2_ms
+            || new_config.global429_level3_min_ms != old_config.global429_level3_min_ms
+            || new_config.global429_level3_max_ms != old_config.global429_level3_max_ms
+        {
+            self.token_manager.update_global_cooldown_config(
+                new_config.global429_enabled,
+                new_config.global429_window_ms,
+                new_config.global429_level1_ms,
+                new_config.global429_level2_ms,
+                new_config.global429_level3_min_ms,
+                new_config.global429_level3_max_ms,
+            );
+        }
         if new_config.log_buffer_capacity != old_config.log_buffer_capacity {
             let cap = new_config
                 .log_buffer_capacity
@@ -1137,6 +1153,12 @@ fn diff_config_fields(old: &Config, new: &Config) -> (Vec<String>, Vec<String>) 
     diff!(rl429_backoff_max_ms, "rl429BackoffMaxMs", hot);
     diff!(rl429_backoff_multiplier_milli, "rl429BackoffMultiplierMilli", hot);
     diff!(max_concurrent_per_credential, "maxConcurrentPerCredential", hot);
+    diff!(global429_enabled, "global429Enabled", hot);
+    diff!(global429_window_ms, "global429WindowMs", hot);
+    diff!(global429_level1_ms, "global429Level1Ms", hot);
+    diff!(global429_level2_ms, "global429Level2Ms", hot);
+    diff!(global429_level3_min_ms, "global429Level3MinMs", hot);
+    diff!(global429_level3_max_ms, "global429Level3MaxMs", hot);
     diff!(log_buffer_capacity, "logBufferCapacity", hot);
     // 鉴权类：通过 RwLock 热轮换
     diff!(api_key, "apiKey", hot);
@@ -1445,6 +1467,76 @@ fn build_config_schema() -> ConfigSchemaResponse {
                         "number",
                         false,
                         "连续命中 429 时退避时长的递增倍数，千分比整数（1500 = 1.5×）。base×(值/1000)^(n-1) 封顶上限。用整数便于编辑；默认 1500",
+                    )
+                },
+                ConfigSchemaField {
+                    default_value: Some(json!(false)),
+                    ..field(
+                        "global429Enabled",
+                        "全局 429 背压",
+                        "boolean",
+                        false,
+                        "开启后：上游频繁 429（平台级过载）时所有号的新请求短暂统一暂停，防重试风暴（已在飞请求不受影响）。仅当确认 Kiro 的 429 是平台级时再开，否则单号 429 会误伤全局延迟。默认关闭",
+                    )
+                },
+                ConfigSchemaField {
+                    min: Some(1000.0),
+                    max: Some(600_000.0),
+                    default_value: Some(json!(120000)),
+                    ..field(
+                        "global429WindowMs",
+                        "全局背压 升级窗口(ms)",
+                        "number",
+                        false,
+                        "在此窗口内累计 429 次数决定升级等级；超窗口无 429 则等级重置。默认 120000(2min)",
+                    )
+                },
+                ConfigSchemaField {
+                    min: Some(0.0),
+                    max: Some(600_000.0),
+                    default_value: Some(json!(5000)),
+                    ..field(
+                        "global429Level1Ms",
+                        "全局背压 首次暂停(ms)",
+                        "number",
+                        false,
+                        "首次 429 的全局暂停时长。默认 5000",
+                    )
+                },
+                ConfigSchemaField {
+                    min: Some(0.0),
+                    max: Some(600_000.0),
+                    default_value: Some(json!(15000)),
+                    ..field(
+                        "global429Level2Ms",
+                        "全局背压 二次暂停(ms)",
+                        "number",
+                        false,
+                        "窗口内第 2 次 429 的全局暂停时长。默认 15000",
+                    )
+                },
+                ConfigSchemaField {
+                    min: Some(0.0),
+                    max: Some(600_000.0),
+                    default_value: Some(json!(30000)),
+                    ..field(
+                        "global429Level3MinMs",
+                        "全局背压 三次+暂停下限(ms)",
+                        "number",
+                        false,
+                        "窗口内第 3 次及以上 429 的全局暂停下限（与上限间随机）。默认 30000",
+                    )
+                },
+                ConfigSchemaField {
+                    min: Some(0.0),
+                    max: Some(600_000.0),
+                    default_value: Some(json!(60000)),
+                    ..field(
+                        "global429Level3MaxMs",
+                        "全局背压 三次+暂停上限(ms)",
+                        "number",
+                        false,
+                        "窗口内第 3 次及以上 429 的全局暂停上限。默认 60000",
                     )
                 },
                 ConfigSchemaField {

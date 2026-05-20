@@ -134,6 +134,34 @@ pub struct Config {
     #[serde(default = "default_max_concurrent_per_credential")]
     pub max_concurrent_per_credential: u32,
 
+    /// 全局 429 背压开关 —— Phase C
+    ///
+    /// 上游频繁 429（平台级过载）时，让所有号的新请求短暂统一暂停，防重试风暴。
+    /// 默认 **关闭**：仅当确认 Kiro 的 429 是平台级（而非单号配额）时再开，否则单号
+    /// 429 会误伤全局延迟。
+    #[serde(default)]
+    pub global429_enabled: bool,
+
+    /// 全局 429 背压：升级判定窗口（毫秒）—— Phase C
+    #[serde(default = "default_global429_window_ms")]
+    pub global429_window_ms: u64,
+
+    /// 全局 429 背压：首次 429 全局暂停时长（毫秒）—— Phase C
+    #[serde(default = "default_global429_level1_ms")]
+    pub global429_level1_ms: u64,
+
+    /// 全局 429 背压：窗口内第 2 次暂停时长（毫秒）—— Phase C
+    #[serde(default = "default_global429_level2_ms")]
+    pub global429_level2_ms: u64,
+
+    /// 全局 429 背压：第 3 次+ 暂停下限（毫秒，与上限间随机）—— Phase C
+    #[serde(default = "default_global429_level3_min_ms")]
+    pub global429_level3_min_ms: u64,
+
+    /// 全局 429 背压：第 3 次+ 暂停上限（毫秒）—— Phase C
+    #[serde(default = "default_global429_level3_max_ms")]
+    pub global429_level3_max_ms: u64,
+
     /// 429 短退避倍数（千分比）—— Phase A
     ///
     /// 每连续命中一次 ×(此值/1000)，封顶 max。用整数千分比而非浮点，方便 Admin UI
@@ -245,6 +273,26 @@ fn default_max_concurrent_per_credential() -> u32 {
     5
 }
 
+fn default_global429_window_ms() -> u64 {
+    120_000
+}
+
+fn default_global429_level1_ms() -> u64 {
+    5_000
+}
+
+fn default_global429_level2_ms() -> u64 {
+    15_000
+}
+
+fn default_global429_level3_min_ms() -> u64 {
+    30_000
+}
+
+fn default_global429_level3_max_ms() -> u64 {
+    60_000
+}
+
 fn default_extract_thinking() -> bool {
     true
 }
@@ -281,6 +329,12 @@ impl Default for Config {
             rl429_backoff_max_ms: default_rl429_backoff_max_ms(),
             rl429_backoff_multiplier_milli: default_rl429_backoff_multiplier_milli(),
             max_concurrent_per_credential: default_max_concurrent_per_credential(),
+            global429_enabled: false,
+            global429_window_ms: default_global429_window_ms(),
+            global429_level1_ms: default_global429_level1_ms(),
+            global429_level2_ms: default_global429_level2_ms(),
+            global429_level3_min_ms: default_global429_level3_min_ms(),
+            global429_level3_max_ms: default_global429_level3_max_ms(),
             log_buffer_capacity: None,
             extract_thinking: default_extract_thinking(),
             default_endpoint: default_endpoint(),

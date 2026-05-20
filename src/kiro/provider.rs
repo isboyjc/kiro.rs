@@ -403,6 +403,8 @@ impl KiroProvider {
                     max_retries,
                     body
                 );
+                // Phase C：MCP 的 429 也计入全局背压信号
+                self.token_manager.record_global_429();
                 last_error = Some(anyhow::anyhow!("MCP 请求失败: {} {}", status, body));
                 if attempt + 1 < max_retries {
                     sleep(Self::retry_delay(attempt)).await;
@@ -465,6 +467,16 @@ impl KiroProvider {
 
         // 尝试从请求体中提取模型信息
         let model = Self::extract_model_from_request(request_body);
+
+        // Phase C：全局 429 背压——上游过载时新请求在此短暂等待，给上游喘息空间
+        // （已在飞的请求已过此点，不受影响）。等待一轮即放行，避免饿死。
+        if let Some(wait) = self.token_manager.global_cooldown_remaining() {
+            tracing::info!(
+                wait_ms = wait.as_millis() as u64,
+                "全局 429 背压生效，新请求等待后再选号"
+            );
+            sleep(wait).await;
+        }
 
         for attempt in 0..max_retries {
             // 获取调用上下文：带用户亲和性，同一 user_id 的连续对话尽量复用同一凭据，
@@ -731,6 +743,8 @@ impl KiroProvider {
                     status,
                     body
                 ));
+                // Phase C：上游 429 计入全局背压（频繁则触发全局短暂停，防重试风暴）
+                self.token_manager.record_global_429();
                 failed_ids.push(ctx.id);
                 continue;
             }

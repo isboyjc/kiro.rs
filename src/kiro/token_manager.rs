@@ -22,6 +22,7 @@ use crate::kiro::affinity::UserAffinityManager;
 use crate::kiro::background_refresh::BackgroundRefresher;
 use crate::kiro::concurrency::{ConcurrencyLimiter, InFlightGuard};
 use crate::kiro::cooldown::{CooldownManager, CooldownReason};
+use crate::kiro::global_cooldown::GlobalCooldown;
 use crate::kiro::fingerprint::Fingerprint;
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
@@ -822,6 +823,8 @@ pub struct MultiTokenManager {
     cooldown_manager: CooldownManager,
     /// 单凭据并发限制器（Phase B：在飞请求数 ≤ N）
     concurrency: Arc<ConcurrencyLimiter>,
+    /// 全局 429 背压熔断器（Phase C）
+    global_cooldown: GlobalCooldown,
     /// 后台 token 刷新器（启动后周期检查过期凭据）
     #[allow(dead_code)]
     background_refresher: Option<Arc<BackgroundRefresher>>,
@@ -967,6 +970,15 @@ impl MultiTokenManager {
         );
         // Phase B：单凭据并发上限
         let max_concurrent = config.max_concurrent_per_credential;
+        // Phase C：全局 429 背压参数
+        let global_cd = GlobalCooldown::new(
+            config.global429_enabled,
+            config.global429_window_ms,
+            config.global429_level1_ms,
+            config.global429_level2_ms,
+            config.global429_level3_min_ms,
+            config.global429_level3_max_ms,
+        );
         let manager = Self {
             config,
             proxy,
@@ -983,6 +995,7 @@ impl MultiTokenManager {
             rate_limiter: RateLimiter::new(rate_limit_config),
             cooldown_manager: CooldownManager::new(),
             concurrency: ConcurrencyLimiter::new(max_concurrent),
+            global_cooldown: global_cd,
             background_refresher: None,
         };
         manager
@@ -1758,6 +1771,39 @@ impl MultiTokenManager {
     pub fn update_concurrency_config(&self, max_per_credential: u32) {
         self.concurrency.set_max(max_per_credential);
         tracing::info!(max_per_credential, "单凭据并发上限已热更新");
+    }
+
+    /// Phase C：记录一次上游 429，按分级触发全局背压。返回本次全局暂停时长。
+    pub fn record_global_429(&self) -> StdDuration {
+        self.global_cooldown.record_429()
+    }
+
+    /// Phase C：当前全局背压剩余时长（None = 未暂停 / 关闭）。
+    /// 由请求入口在 acquire 前调用，决定是否等待。
+    pub fn global_cooldown_remaining(&self) -> Option<StdDuration> {
+        self.global_cooldown.paused_remaining()
+    }
+
+    /// Phase C：热更新全局背压参数
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_global_cooldown_config(
+        &self,
+        enabled: bool,
+        window_ms: u64,
+        level1_ms: u64,
+        level2_ms: u64,
+        level3_min_ms: u64,
+        level3_max_ms: u64,
+    ) {
+        self.global_cooldown.update(
+            enabled,
+            window_ms,
+            level1_ms,
+            level2_ms,
+            level3_min_ms,
+            level3_max_ms,
+        );
+        tracing::info!(enabled, window_ms, "全局 429 背压参数已热更新");
     }
 
     /// 热更新 429 短退避参数（Phase A：Admin UI 可改 / 恢复默认）。
