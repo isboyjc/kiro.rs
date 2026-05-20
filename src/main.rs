@@ -208,6 +208,7 @@ async fn main() {
         extract_thinking_shared.clone(),
         compression_config_shared.clone(),
         prompt_cache_runtime.clone(),
+        Some(log_ring.clone()),
     );
 
     // 构建 Admin API 路由（如果配置了非空的 admin_api_key）

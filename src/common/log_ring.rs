@@ -48,6 +48,18 @@ pub struct ModelCallMeta {
     /// 失败时的错误摘要（截断后）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_summary: Option<String>,
+    /// 阶段 7.15：输入 token 数（成功调用时填充）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<i32>,
+    /// 输出 token 数
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<i32>,
+    /// 缓存读取 token 数（命中）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<i32>,
+    /// 缓存写入 token 数（创建）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<i32>,
 }
 
 /// 统一日志条目
@@ -119,6 +131,42 @@ impl LogRing {
             buf.pop_front();
         }
         buf.push_back(entry);
+    }
+
+    /// 阶段 7.15：从 ModelCallMeta 构造并追加一条 ModelCall 日志。
+    /// level 按 status 推断，message 自动拼装（含 token 概要）。
+    pub fn record_model_call(&self, meta: ModelCallMeta) {
+        let level = if meta.status >= 400 || meta.status == 0 {
+            "ERROR"
+        } else {
+            "INFO"
+        };
+        let model_disp = meta.model.as_deref().unwrap_or("<no-model>");
+        let mut message = if meta.status == 0 {
+            format!("#{} → {} 网络错误 {}ms", meta.credential_id, model_disp, meta.duration_ms)
+        } else {
+            format!("#{} → {} {} {}ms", meta.credential_id, model_disp, meta.status, meta.duration_ms)
+        };
+        // 成功且有 token 数据时附加 token 概要
+        if let (Some(inp), Some(out)) = (meta.input_tokens, meta.output_tokens) {
+            message.push_str(&format!(" · in {} out {}", inp, out));
+            if let Some(r) = meta.cache_read_input_tokens.filter(|&v| v > 0) {
+                message.push_str(&format!(" · cache_r {}", r));
+            }
+            if let Some(c) = meta.cache_creation_input_tokens.filter(|&v| v > 0) {
+                message.push_str(&format!(" · cache_w {}", c));
+            }
+        }
+        self.push(LogEntry {
+            seq: 0,
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            level: level.to_string(),
+            kind: LogKind::ModelCall,
+            target: "kiro::call".to_string(),
+            message,
+            fields: HashMap::new(),
+            model_call: Some(meta),
+        });
     }
 
     /// 查询并返回过滤后的快照（按时间倒序，最新在前）

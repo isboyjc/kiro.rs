@@ -48,11 +48,19 @@ pub struct KiroProvider {
     log_ring: Option<Arc<crate::common::log_ring::LogRing>>,
 }
 
-/// 阶段 7.14：API 调用结果——除了上游响应，还回传实际使用的凭据 ID，
-/// 供 prompt cache 记账按凭据隔离缓存状态。
+/// 阶段 7.14 / 7.15：API 调用结果——回传上游响应 + 实际凭据 ID + 调用元数据，
+/// 供 handler 做 prompt cache 记账（按凭据隔离）和成功调用的 ModelCall 日志（带 token）。
 pub struct ApiCallResult {
     pub response: reqwest::Response,
     pub credential_id: u64,
+    /// 上游响应耗时（ms，到响应头）
+    pub duration_ms: u32,
+    /// 实际使用的端点名（ide / cli）
+    pub endpoint_name: String,
+    /// 请求模型（用于日志）
+    pub model: Option<String>,
+    /// 第几次重试命中（0 = 首次）
+    pub retry_attempt: u32,
 }
 
 impl KiroProvider {
@@ -98,7 +106,11 @@ impl KiroProvider {
         self
     }
 
-    /// 阶段 7.9：追加一条 ModelCall 记录到日志环形缓冲（若已注入）
+    /// 阶段 7.9 / 7.15：追加一条 ModelCall 记录到日志环形缓冲（若已注入）
+    ///
+    /// provider 只记录**失败/网络错**（无 token 数据）；成功调用的记录移到
+    /// handler 层（拿到 input/output/cache token 后再记，见 handlers.rs）。
+    #[allow(clippy::too_many_arguments)]
     fn record_model_call(
         &self,
         credential_id: u64,
@@ -115,51 +127,29 @@ impl KiroProvider {
             Some(r) => r,
             None => return,
         };
-        let level = if status >= 400 || status == 0 {
-            "ERROR"
-        } else {
-            "INFO"
-        };
-        let summary_body = error_summary
-            .as_deref()
-            .map(|s| {
-                let trimmed = s.trim();
-                if trimmed.len() > 200 {
-                    format!("{}...", &trimmed[..crate::common::utf8::floor_char_boundary(trimmed, 200)])
-                } else {
-                    trimmed.to_string()
-                }
-            });
-        let model_disp = model.as_deref().unwrap_or("<no-model>");
-        let message = if status > 0 && status < 400 {
-            format!("#{} → {} {} {}ms", credential_id, model_disp, status, duration_ms)
-        } else if status == 0 {
-            format!("#{} → {} 网络错误 {}ms", credential_id, model_disp, duration_ms)
-        } else {
-            format!("#{} → {} {} {}ms", credential_id, model_disp, status, duration_ms)
-        };
-
-        let entry = crate::common::log_ring::LogEntry {
-            seq: 0, // LogRing::push 会覆盖
-            timestamp: chrono::Utc::now().timestamp_millis(),
-            level: level.to_string(),
-            kind: crate::common::log_ring::LogKind::ModelCall,
-            target: "kiro::call".to_string(),
-            message,
-            fields: std::collections::HashMap::new(),
-            model_call: Some(crate::common::log_ring::ModelCallMeta {
-                credential_id,
-                model,
-                endpoint: endpoint_name.to_string(),
-                api_type: api_type.to_string(),
-                status,
-                duration_ms,
-                retry_attempt,
-                is_stream,
-                error_summary: summary_body,
-            }),
-        };
-        ring.push(entry);
+        let summary_body = error_summary.as_deref().map(|s| {
+            let trimmed = s.trim();
+            if trimmed.len() > 200 {
+                format!("{}...", &trimmed[..crate::common::utf8::floor_char_boundary(trimmed, 200)])
+            } else {
+                trimmed.to_string()
+            }
+        });
+        ring.record_model_call(crate::common::log_ring::ModelCallMeta {
+            credential_id,
+            model,
+            endpoint: endpoint_name.to_string(),
+            api_type: api_type.to_string(),
+            status,
+            duration_ms,
+            retry_attempt,
+            is_stream,
+            error_summary: summary_body,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+        });
     }
 
     /// 根据凭据的代理配置获取（或创建并缓存）对应的 reqwest::Client
@@ -540,21 +530,15 @@ impl KiroProvider {
             // 成功响应
             if status.is_success() {
                 let dur = started_at.elapsed().as_millis() as u32;
-                self.record_model_call(
-                    ctx.id,
-                    model.clone(),
-                    &endpoint_name_owned,
-                    api_kind,
-                    status.as_u16(),
-                    dur,
-                    attempt as u32,
-                    is_stream,
-                    None,
-                );
+                // 阶段 7.15：成功记录移到 handler（拿到 token 后再记），这里只回传元数据
                 self.token_manager.report_success(ctx.id);
                 return Ok(ApiCallResult {
                     response,
                     credential_id: ctx.id,
+                    duration_ms: dur,
+                    endpoint_name: endpoint_name_owned.clone(),
+                    model: model.clone(),
+                    retry_attempt: attempt as u32,
                 });
             }
 

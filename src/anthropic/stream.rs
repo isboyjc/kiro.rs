@@ -544,6 +544,19 @@ pub struct StreamContext {
     strip_thinking_leading_newline: bool,
     /// 阶段 7.14：prompt cache 记账结果（None = accounting 关闭）
     pub cache_usage: Option<super::cache_tracker::CacheResult>,
+    /// 阶段 7.15：流结束时记录带 token 的 ModelCall 日志（None = 未注入 log_ring）
+    pub pending_model_call_log: Option<PendingModelCallLog>,
+}
+
+/// 阶段 7.15：流式调用结束后补记 ModelCall 日志所需的元数据
+pub struct PendingModelCallLog {
+    pub log_ring: std::sync::Arc<crate::common::log_ring::LogRing>,
+    pub credential_id: u64,
+    pub duration_ms: u32,
+    pub endpoint: String,
+    pub model: Option<String>,
+    pub api_type: String,
+    pub retry_attempt: u32,
 }
 
 impl StreamContext {
@@ -571,6 +584,7 @@ impl StreamContext {
             text_block_index: None,
             strip_thinking_leading_newline: false,
             cache_usage: None,
+            pending_model_call_log: None,
         }
     }
 
@@ -581,6 +595,40 @@ impl StreamContext {
     ) -> Self {
         self.cache_usage = cache_usage;
         self
+    }
+
+    /// 阶段 7.15：链式注入流结束后补记 ModelCall 日志的元数据
+    pub fn with_model_call_log(mut self, pending: Option<PendingModelCallLog>) -> Self {
+        self.pending_model_call_log = pending;
+        self
+    }
+
+    /// 阶段 7.15：流结束时调用——用累计的 output_tokens + 已知 input/cache 补记 ModelCall 日志。
+    /// 幂等：调用后清空 pending，避免重复记录。
+    pub fn emit_model_call_log(&mut self) {
+        let Some(p) = self.pending_model_call_log.take() else {
+            return;
+        };
+        let input = self.context_input_tokens.unwrap_or(self.input_tokens);
+        let (cache_read, cache_creation) = match &self.cache_usage {
+            Some(c) => (Some(c.cache_read_input_tokens), Some(c.cache_creation_input_tokens)),
+            None => (None, None),
+        };
+        p.log_ring.record_model_call(crate::common::log_ring::ModelCallMeta {
+            credential_id: p.credential_id,
+            model: p.model,
+            endpoint: p.endpoint,
+            api_type: p.api_type,
+            status: 200,
+            duration_ms: p.duration_ms,
+            retry_attempt: p.retry_attempt,
+            is_stream: true,
+            error_summary: None,
+            input_tokens: Some(input),
+            output_tokens: Some(self.output_tokens),
+            cache_read_input_tokens: cache_read,
+            cache_creation_input_tokens: cache_creation,
+        });
     }
 
     /// 生成 message_start 事件
@@ -1199,6 +1247,13 @@ impl BufferedStreamContext {
         self
     }
 
+    /// 阶段 7.15：注入流结束后补记 ModelCall 日志的元数据（委托给 inner）
+    /// emit 由 finish_and_get_all_events 内部调 inner.emit_model_call_log 触发
+    pub fn with_model_call_log(mut self, pending: Option<PendingModelCallLog>) -> Self {
+        self.inner.pending_model_call_log = pending;
+        self
+    }
+
     /// 处理 Kiro 事件并缓冲结果
     ///
     /// 复用 StreamContext 的事件处理逻辑，但把结果缓存而不是立即发送。
@@ -1249,6 +1304,9 @@ impl BufferedStreamContext {
                 }
             }
         }
+
+        // 阶段 7.15：流结束补记带 token 的 ModelCall 日志
+        self.inner.emit_model_call_log();
 
         std::mem::take(&mut self.event_buffer)
     }

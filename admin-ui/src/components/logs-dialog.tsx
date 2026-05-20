@@ -450,6 +450,19 @@ function LogRow({
             <>
               <span className="font-medium">#{mc?.credentialId}</span>
               <span className="text-muted-foreground"> · {mc?.durationMs}ms</span>
+              {/* 阶段 7.15：token 明细 */}
+              {mc && mc.inputTokens != null && (
+                <span className="ml-1.5 text-muted-foreground">
+                  · <span className="text-foreground">↓{mc.inputTokens}</span>
+                  {' '}<span className="text-foreground">↑{mc.outputTokens ?? 0}</span>
+                  {!!mc.cacheReadInputTokens && (
+                    <span className="text-green-600"> · 命中{mc.cacheReadInputTokens}</span>
+                  )}
+                  {!!mc.cacheCreationInputTokens && (
+                    <span className="text-blue-500"> · 写{mc.cacheCreationInputTokens}</span>
+                  )}
+                </span>
+              )}
               {mc && mc.retryAttempt > 0 && (
                 <span className="ml-1.5 text-amber-600 font-medium">↻ 重试 {mc.retryAttempt}</span>
               )}
@@ -513,6 +526,21 @@ function ExpandedDetails({ entry }: { entry: LogEntry }) {
     })
     rows.push({ label: '状态', value: String(mc.status), mono: true })
     rows.push({ label: '耗时', value: `${mc.durationMs} ms`, mono: true })
+    // 阶段 7.15：token 明细
+    if (mc.inputTokens != null) {
+      rows.push({ label: '输入 token', value: String(mc.inputTokens), mono: true })
+      rows.push({ label: '输出 token', value: String(mc.outputTokens ?? 0), mono: true })
+      rows.push({
+        label: '缓存读取',
+        value: String(mc.cacheReadInputTokens ?? 0),
+        mono: true,
+      })
+      rows.push({
+        label: '缓存写入',
+        value: String(mc.cacheCreationInputTokens ?? 0),
+        mono: true,
+      })
+    }
     if (mc.retryAttempt > 0) rows.push({ label: '重试次数', value: String(mc.retryAttempt), mono: true })
     if (mc.errorSummary) {
       rows.push({

@@ -42,12 +42,14 @@ const MAX_BODY_SIZE: usize = 50 * 1024 * 1024;
 ///
 /// `api_key` / `extract_thinking` 接收外部共享的 `Arc<RwLock<>>`——admin 端
 /// 写入后下次请求即生效，无需重启。
+#[allow(clippy::too_many_arguments)]
 pub fn create_router_with_provider(
     api_key: Arc<RwLock<String>>,
     kiro_provider: Option<KiroProvider>,
     extract_thinking: Arc<RwLock<bool>>,
     compression_config: Arc<RwLock<CompressionConfig>>,
     prompt_cache_runtime: Arc<RwLock<PromptCacheRuntime>>,
+    log_ring: Option<Arc<crate::common::log_ring::LogRing>>,
 ) -> Router {
     let mut state = AppState::new(String::new(), false)
         .with_api_key_shared(api_key)
@@ -56,6 +58,9 @@ pub fn create_router_with_provider(
         .with_prompt_cache_runtime(prompt_cache_runtime);
     if let Some(provider) = kiro_provider {
         state = state.with_kiro_provider(provider);
+    }
+    if let Some(ring) = log_ring {
+        state = state.with_log_ring(ring);
     }
 
     // 需要认证的 /v1 路由

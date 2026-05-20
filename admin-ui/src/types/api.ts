@@ -120,6 +120,11 @@ export interface ModelCallMeta {
   retryAttempt: number
   isStream: boolean
   errorSummary?: string
+  /** 阶段 7.15：token 明细（成功调用时有） */
+  inputTokens?: number
+  outputTokens?: number
+  cacheReadInputTokens?: number
+  cacheCreationInputTokens?: number
 }
 
 export interface LogEntry {

@@ -24,7 +24,9 @@ use uuid::Uuid;
 use super::cache_tracker::{CacheProfile, CacheResult, CacheTracker};
 use super::converter::{ConversionError, convert_request};
 use super::middleware::AppState;
-use super::stream::{BufferedStreamContext, SseEvent, StreamContext};
+use super::stream::{BufferedStreamContext, PendingModelCallLog, SseEvent, StreamContext};
+use crate::common::log_ring::LogRing;
+use crate::kiro::provider::ApiCallResult;
 use super::types::{CountTokensRequest, CountTokensResponse, ErrorResponse, MessagesRequest, Model, ModelsResponse, OutputConfig, Thinking};
 use super::websearch;
 
@@ -36,6 +38,23 @@ fn inject_cache_usage(usage: &mut serde_json::Value, c: &CacheResult) {
         "ephemeral_5m_input_tokens": c.cache_creation_5m_input_tokens,
         "ephemeral_1h_input_tokens": c.cache_creation_1h_input_tokens,
     });
+}
+
+/// 阶段 7.15：从 ApiCallResult + log_ring 构造流结束后补记日志的元数据
+fn build_pending_log(
+    log_ring: Option<std::sync::Arc<LogRing>>,
+    api: &ApiCallResult,
+    api_type: &str,
+) -> Option<PendingModelCallLog> {
+    log_ring.map(|ring| PendingModelCallLog {
+        log_ring: ring,
+        credential_id: api.credential_id,
+        duration_ms: api.duration_ms,
+        endpoint: api.endpoint_name.clone(),
+        model: api.model.clone(),
+        api_type: api_type.to_string(),
+        retry_attempt: api.retry_attempt,
+    })
 }
 
 /// 阶段 7.14：拿到实际凭据后 compute + update 缓存状态，返回 CacheResult。
@@ -348,6 +367,8 @@ pub async fn post_messages(
 
     let tool_name_map = conversion_result.tool_name_map;
 
+    let log_ring = state.log_ring.clone();
+
     if payload.stream {
         // 流式响应
         handle_stream_request(
@@ -359,6 +380,7 @@ pub async fn post_messages(
             tool_name_map,
             cache_tracker,
             cache_profile,
+            log_ring,
         )
         .await
     } else {
@@ -373,6 +395,7 @@ pub async fn post_messages(
             tool_name_map,
             cache_tracker,
             cache_profile,
+            log_ring,
         )
         .await
     }
@@ -389,6 +412,7 @@ async fn handle_stream_request(
     tool_name_map: std::collections::HashMap<String, String>,
     cache_tracker: Option<std::sync::Arc<CacheTracker>>,
     cache_profile: Option<CacheProfile>,
+    log_ring: Option<std::sync::Arc<crate::common::log_ring::LogRing>>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
     let api_result = match provider.call_api_stream(request_body).await {
@@ -398,10 +422,13 @@ async fn handle_stream_request(
 
     // 阶段 7.14：拿到实际凭据后计算并记录 cache 使用
     let cache_usage = resolve_and_record_cache(&cache_tracker, &cache_profile, api_result.credential_id);
+    // 阶段 7.15：构造流结束后补记 ModelCall 日志的元数据
+    let pending_log = build_pending_log(log_ring, &api_result, "anthropic_stream");
 
     // 创建流处理上下文
     let mut ctx = StreamContext::new_with_thinking(model, input_tokens, thinking_enabled, tool_name_map)
-        .with_cache_usage(cache_usage);
+        .with_cache_usage(cache_usage)
+        .with_model_call_log(pending_log);
 
     // 生成初始事件
     let initial_events = ctx.generate_initial_events();
@@ -488,6 +515,8 @@ fn create_sse_stream(
                             tracing::error!("读取响应流失败: {}", e);
                             // 发送最终事件并结束
                             let final_events = ctx.generate_final_events();
+                            // 阶段 7.15：流结束补记带 token 的 ModelCall 日志
+                            ctx.emit_model_call_log();
                             let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
@@ -497,6 +526,8 @@ fn create_sse_stream(
                         None => {
                             // 流结束，发送最终事件
                             let final_events = ctx.generate_final_events();
+                            // 阶段 7.15：流结束补记带 token 的 ModelCall 日志
+                            ctx.emit_model_call_log();
                             let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
@@ -532,6 +563,7 @@ async fn handle_non_stream_request(
     tool_name_map: std::collections::HashMap<String, String>,
     cache_tracker: Option<std::sync::Arc<CacheTracker>>,
     cache_profile: Option<CacheProfile>,
+    log_ring: Option<std::sync::Arc<crate::common::log_ring::LogRing>>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
     let api_result = match provider.call_api(request_body).await {
@@ -541,6 +573,12 @@ async fn handle_non_stream_request(
 
     // 阶段 7.14：拿到实际凭据后计算并记录 cache 使用
     let cache_usage = resolve_and_record_cache(&cache_tracker, &cache_profile, api_result.credential_id);
+    // 阶段 7.15：保存元数据，响应解析后补记 ModelCall 日志
+    let call_credential_id = api_result.credential_id;
+    let call_duration_ms = api_result.duration_ms;
+    let call_endpoint = api_result.endpoint_name.clone();
+    let call_model = api_result.model.clone();
+    let call_retry = api_result.retry_attempt;
     let response = api_result.response;
 
     // 读取响应体
@@ -714,6 +752,29 @@ async fn handle_non_stream_request(
         "stop_sequence": null,
         "usage": usage
     });
+
+    // 阶段 7.15：补记带 token 的 ModelCall 成功日志
+    if let Some(ring) = &log_ring {
+        let (cache_read, cache_creation) = match &cache_usage {
+            Some(c) => (Some(c.cache_read_input_tokens), Some(c.cache_creation_input_tokens)),
+            None => (None, None),
+        };
+        ring.record_model_call(crate::common::log_ring::ModelCallMeta {
+            credential_id: call_credential_id,
+            model: call_model,
+            endpoint: call_endpoint,
+            api_type: "anthropic".to_string(),
+            status: 200,
+            duration_ms: call_duration_ms,
+            retry_attempt: call_retry,
+            is_stream: false,
+            error_summary: None,
+            input_tokens: Some(final_input_tokens),
+            output_tokens: Some(output_tokens),
+            cache_read_input_tokens: cache_read,
+            cache_creation_input_tokens: cache_creation,
+        });
+    }
 
     (StatusCode::OK, Json(response_body)).into_response()
 }
@@ -913,6 +974,8 @@ pub async fn post_messages_cc(
 
     let tool_name_map = conversion_result.tool_name_map;
 
+    let log_ring = state.log_ring.clone();
+
     if payload.stream {
         // 流式响应（缓冲模式）
         handle_stream_request_buffered(
@@ -924,6 +987,7 @@ pub async fn post_messages_cc(
             tool_name_map,
             cache_tracker,
             cache_profile,
+            log_ring,
         )
         .await
     } else {
@@ -938,6 +1002,7 @@ pub async fn post_messages_cc(
             tool_name_map,
             cache_tracker,
             cache_profile,
+            log_ring,
         )
         .await
     }
@@ -957,6 +1022,7 @@ async fn handle_stream_request_buffered(
     tool_name_map: std::collections::HashMap<String, String>,
     cache_tracker: Option<std::sync::Arc<CacheTracker>>,
     cache_profile: Option<CacheProfile>,
+    log_ring: Option<std::sync::Arc<crate::common::log_ring::LogRing>>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
     let api_result = match provider.call_api_stream(request_body).await {
@@ -966,10 +1032,13 @@ async fn handle_stream_request_buffered(
 
     // 阶段 7.14：拿到实际凭据后计算并记录 cache 使用
     let cache_usage = resolve_and_record_cache(&cache_tracker, &cache_profile, api_result.credential_id);
+    // 阶段 7.15：cc 流式标记 api_type
+    let pending_log = build_pending_log(log_ring, &api_result, "anthropic_cc_stream");
 
     // 创建缓冲流处理上下文
     let ctx = BufferedStreamContext::new(model, estimated_input_tokens, thinking_enabled, tool_name_map)
-        .with_cache_usage(cache_usage);
+        .with_cache_usage(cache_usage)
+        .with_model_call_log(pending_log);
 
     // 创建缓冲 SSE 流
     let stream = create_buffered_sse_stream(api_result.response, ctx);

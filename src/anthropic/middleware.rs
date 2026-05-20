@@ -103,6 +103,9 @@ pub struct AppState {
     /// 持有 `Arc<RwLock<PromptCacheRuntime>>` 以预留阶段 5 热加载能力。
     /// 当前 stream/handlers/websearch 尚未接入 cache 拆分，模块就位供未来使用。
     pub prompt_cache_runtime: Arc<RwLock<PromptCacheRuntime>>,
+    /// 阶段 7.15：日志环形缓冲（与 main.rs / provider / admin 共用），
+    /// 用于在 handler 层记录带 token 的成功 ModelCall 日志
+    pub log_ring: Option<Arc<crate::common::log_ring::LogRing>>,
 }
 
 impl AppState {
@@ -115,7 +118,14 @@ impl AppState {
             compression_config: Arc::new(RwLock::new(CompressionConfig::default())),
             // 默认 TTL 300s（5m），accounting 启用——与 Anthropic ephemeral 默认值对齐
             prompt_cache_runtime: Arc::new(RwLock::new(PromptCacheRuntime::new(300, true))),
+            log_ring: None,
         }
+    }
+
+    /// 阶段 7.15：注入日志环形缓冲
+    pub fn with_log_ring(mut self, log_ring: Arc<crate::common::log_ring::LogRing>) -> Self {
+        self.log_ring = Some(log_ring);
+        self
     }
 
     /// 设置 KiroProvider
