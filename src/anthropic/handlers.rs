@@ -379,6 +379,9 @@ pub async fn post_messages(
 
     let log_ring = state.log_ring.clone();
 
+    // 提取 user_id 用于凭据亲和性（连续对话尽量落同一凭据，复用 prompt cache 前缀）
+    let user_id = payload.metadata.as_ref().and_then(|m| m.user_id.clone());
+
     if payload.stream {
         // 流式响应
         handle_stream_request(
@@ -391,6 +394,7 @@ pub async fn post_messages(
             cache_tracker,
             cache_profile,
             log_ring,
+            user_id.as_deref(),
         )
         .await
     } else {
@@ -406,6 +410,7 @@ pub async fn post_messages(
             cache_tracker,
             cache_profile,
             log_ring,
+            user_id.as_deref(),
         )
         .await
     }
@@ -423,9 +428,10 @@ async fn handle_stream_request(
     cache_tracker: Option<std::sync::Arc<CacheTracker>>,
     cache_profile: Option<CacheProfile>,
     log_ring: Option<std::sync::Arc<crate::common::log_ring::LogRing>>,
+    user_id: Option<&str>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
-    let api_result = match provider.call_api_stream(request_body).await {
+    let api_result = match provider.call_api_stream(request_body, user_id).await {
         Ok(r) => r,
         Err(e) => return map_provider_error(e),
     };
@@ -574,9 +580,10 @@ async fn handle_non_stream_request(
     cache_tracker: Option<std::sync::Arc<CacheTracker>>,
     cache_profile: Option<CacheProfile>,
     log_ring: Option<std::sync::Arc<crate::common::log_ring::LogRing>>,
+    user_id: Option<&str>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
-    let api_result = match provider.call_api(request_body).await {
+    let api_result = match provider.call_api(request_body, user_id).await {
         Ok(r) => r,
         Err(e) => return map_provider_error(e),
     };
@@ -988,6 +995,9 @@ pub async fn post_messages_cc(
 
     let log_ring = state.log_ring.clone();
 
+    // 提取 user_id 用于凭据亲和性（连续对话尽量落同一凭据，复用 prompt cache 前缀）
+    let user_id = payload.metadata.as_ref().and_then(|m| m.user_id.clone());
+
     if payload.stream {
         // 流式响应（缓冲模式）
         handle_stream_request_buffered(
@@ -1000,6 +1010,7 @@ pub async fn post_messages_cc(
             cache_tracker,
             cache_profile,
             log_ring,
+            user_id.as_deref(),
         )
         .await
     } else {
@@ -1015,6 +1026,7 @@ pub async fn post_messages_cc(
             cache_tracker,
             cache_profile,
             log_ring,
+            user_id.as_deref(),
         )
         .await
     }
@@ -1035,9 +1047,10 @@ async fn handle_stream_request_buffered(
     cache_tracker: Option<std::sync::Arc<CacheTracker>>,
     cache_profile: Option<CacheProfile>,
     log_ring: Option<std::sync::Arc<crate::common::log_ring::LogRing>>,
+    user_id: Option<&str>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
-    let api_result = match provider.call_api_stream(request_body).await {
+    let api_result = match provider.call_api_stream(request_body, user_id).await {
         Ok(r) => r,
         Err(e) => return map_provider_error(e),
     };

@@ -812,7 +812,6 @@ pub struct MultiTokenManager {
     stats_dirty: AtomicBool,
     // === 阶段 4.3 凭据栈扩展（caller 阶段 4.4-4.6 接入）===
     /// 用户亲和性管理器：user_id → credential_id 绑定
-    #[allow(dead_code)]
     affinity: UserAffinityManager,
     /// 凭据级速率限制器（RPM 控制）
     #[allow(dead_code)]
@@ -1012,7 +1011,11 @@ impl MultiTokenManager {
     ///
     /// # 参数
     /// - `model`: 可选的模型名称，用于过滤支持该模型的凭据（如 opus 模型需要付费订阅）
-    fn select_next_credential(&self, model: Option<&str>) -> Option<(u64, KiroCredentials)> {
+    fn select_next_credential(
+        &self,
+        model: Option<&str>,
+        exclude_ids: &[u64],
+    ) -> Option<(u64, KiroCredentials)> {
         let entries = self.entries.lock();
 
         // 检查是否是 opus 模型
@@ -1025,6 +1028,10 @@ impl MultiTokenManager {
             .iter()
             .filter(|e| {
                 if e.disabled {
+                    return false;
+                }
+                // retry 链路排除上次失败的凭据，避免反复选回同一张
+                if exclude_ids.contains(&e.id) {
                     return false;
                 }
                 // 如果是 opus 模型，需要检查订阅等级
@@ -1090,6 +1097,18 @@ impl MultiTokenManager {
     /// # 参数
     /// - `model`: 可选的模型名称，用于过滤支持该模型的凭据（如 opus 模型需要付费订阅）
     pub async fn acquire_context(&self, model: Option<&str>) -> anyhow::Result<CallContext> {
+        self.acquire_context_excluding(model, &[]).await
+    }
+
+    /// 与 [`Self::acquire_context`] 相同，但 `exclude_ids` 内的凭据在选号时被强制跳过。
+    ///
+    /// 用于 retry 链路排除上次失败的凭据，避免反复选回同一张（priority 模式下也会跳过
+    /// current_id 命中、改走完整过滤）。
+    pub async fn acquire_context_excluding(
+        &self,
+        model: Option<&str>,
+        exclude_ids: &[u64],
+    ) -> anyhow::Result<CallContext> {
         let total = self.total_count();
         let max_attempts = (total * MAX_FAILURES_PER_CREDENTIAL as usize).max(1);
         let mut attempt_count = 0;
@@ -1115,10 +1134,12 @@ impl MultiTokenManager {
                     let current_id = *self.current_id.lock();
                     // 阶段 4.5：current_id 凭据也要通过 cooldown + rate_limit 检查；
                     // 否则回退到 select_next_credential() 走完整过滤
+                    // exclude_ids 命中时也跳过（retry 不应选回上次失败的 current_id）
                     entries
                         .iter()
                         .find(|e| {
                             e.id == current_id
+                                && !exclude_ids.contains(&e.id)
                                 && !e.disabled
                                 && self.cooldown_manager.check_cooldown(e.id).is_none()
                                 && self.rate_limiter.check_rate_limit(e.id).is_ok()
@@ -1130,7 +1151,7 @@ impl MultiTokenManager {
                     hit
                 } else {
                     // 当前凭据不可用或 balanced 模式，根据负载均衡策略选择
-                    let mut best = self.select_next_credential(model);
+                    let mut best = self.select_next_credential(model, exclude_ids);
 
                     // 没有可用凭据：如果是"自动禁用导致全灭"，做一次类似重启的自愈
                     if best.is_none() {
@@ -1155,7 +1176,7 @@ impl MultiTokenManager {
                             for id in healed_ids {
                                 self.rate_limiter.reset(id);
                             }
-                            best = self.select_next_credential(model);
+                            best = self.select_next_credential(model, exclude_ids);
                         }
                     }
 
@@ -1215,6 +1236,114 @@ impl MultiTokenManager {
                 }
             }
         }
+    }
+
+    /// 获取指定用户的 API 调用上下文（带凭据亲和性）。
+    ///
+    /// 若用户已绑定凭据且该凭据可用 → 优先复用绑定凭据（连续对话落同一号，
+    /// 复用上游 prompt cache 前缀，cache_read 命中）；否则走默认选号并建立新绑定。
+    ///
+    /// 便捷封装（不带 exclude）；请求路径用带 `_excluding` 的变体，本方法供测试与外部调用。
+    #[allow(dead_code)]
+    pub async fn acquire_context_for_user(
+        &self,
+        user_id: Option<&str>,
+        model: Option<&str>,
+    ) -> anyhow::Result<CallContext> {
+        self.acquire_context_for_user_excluding(user_id, model, &[])
+            .await
+    }
+
+    /// 与 [`Self::acquire_context_for_user`] 相同，但 `exclude_ids` 内的凭据被强制跳过：
+    /// 即使 affinity 命中了被排除的凭据，也会落入默认选号重新挑。
+    /// 用于 retry 链路避免反复选回同一个失败凭据。
+    pub async fn acquire_context_for_user_excluding(
+        &self,
+        user_id: Option<&str>,
+        model: Option<&str>,
+        exclude_ids: &[u64],
+    ) -> anyhow::Result<CallContext> {
+        // 无 user_id 时走默认逻辑（不建立亲和绑定）
+        let user_id = match user_id {
+            Some(id) if !id.is_empty() => id,
+            _ => return self.acquire_context_excluding(model, exclude_ids).await,
+        };
+
+        // 默认保持用户绑定（用于连续对话）。当绑定凭据"临时不可用"（速率限制/短冷却）时，
+        // 允许本次分流到其他凭据，但不重绑，避免频繁抖动。
+        let mut keep_affinity_binding = false;
+
+        if let Some(bound_id) = self.affinity.get(user_id) {
+            // 绑定凭据在 exclude_ids 中（上次失败）→ 跳过 affinity 短路，直接走默认选号
+            let bound_excluded = exclude_ids.contains(&bound_id);
+            let is_enabled = !bound_excluded && {
+                let entries = self.entries.lock();
+                entries.iter().any(|e| e.id == bound_id && !e.disabled)
+            };
+
+            if is_enabled {
+                if let Some((reason, remaining)) = self.cooldown_manager.check_cooldown(bound_id) {
+                    // 对"长冷却"原因（封号/配额/鉴权失败）不保留绑定，避免长期每次都先失败再回退
+                    keep_affinity_binding = matches!(
+                        reason,
+                        CooldownReason::RateLimitExceeded
+                            | CooldownReason::TokenRefreshFailed
+                            | CooldownReason::ServerError
+                            | CooldownReason::ModelUnavailable
+                    );
+                    tracing::debug!(
+                        credential_id = bound_id,
+                        reason = ?reason,
+                        remaining_ms = remaining.as_millis() as u64,
+                        keep_affinity_binding,
+                        "亲和性绑定凭据处于冷却，本次将分流"
+                    );
+                } else if self.rate_limiter.check_rate_limit(bound_id).is_err() {
+                    // 只读检查，不消耗配额
+                    keep_affinity_binding = true;
+                    tracing::debug!(
+                        credential_id = bound_id,
+                        "亲和性绑定凭据触发速率限制，本次将分流"
+                    );
+                } else if self.rate_limiter.try_acquire(bound_id).is_err() {
+                    // check 通过但 try_acquire 竞争失败（TOCTOU），保留绑定分流
+                    keep_affinity_binding = true;
+                    tracing::debug!(
+                        credential_id = bound_id,
+                        "亲和性凭据 try_acquire 竞争失败，本次将分流"
+                    );
+                } else {
+                    let credentials = {
+                        let entries = self.entries.lock();
+                        entries
+                            .iter()
+                            .find(|e| e.id == bound_id)
+                            .map(|e| e.credentials.clone())
+                    };
+                    if let Some(creds) = credentials {
+                        match self.try_ensure_token(bound_id, &creds).await {
+                            Ok(ctx) => {
+                                self.affinity.touch(user_id);
+                                return Ok(ctx);
+                            }
+                            Err(e) => {
+                                tracing::debug!(
+                                    credential_id = bound_id,
+                                    error = %e,
+                                    "亲和性绑定凭据 token 获取/刷新失败，本次将分流"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let ctx = self.acquire_context_excluding(model, exclude_ids).await?;
+        if !keep_affinity_binding {
+            self.affinity.set(user_id, ctx.id);
+        }
+        Ok(ctx)
     }
 
     /// 选择优先级最高的未禁用凭据作为当前凭据（内部方法）
@@ -1551,6 +1680,7 @@ impl MultiTokenManager {
             if failure_count >= MAX_FAILURES_PER_CREDENTIAL {
                 entry.disabled = true;
                 entry.disabled_reason = Some(DisabledReason::TooManyFailures);
+                self.affinity.remove_by_credential(id);
                 tracing::error!("凭据 #{} 已连续失败 {} 次，已被禁用", id, failure_count);
 
                 // 切换到优先级最高的可用凭据
@@ -1608,6 +1738,7 @@ impl MultiTokenManager {
 
             entry.disabled = true;
             entry.disabled_reason = Some(DisabledReason::QuotaExceeded);
+            self.affinity.remove_by_credential(id);
             entry.last_used_at = Some(Utc::now().to_rfc3339());
             // 设为阈值，便于在管理面板中直观看到该凭据已不可用
             entry.failure_count = MAX_FAILURES_PER_CREDENTIAL;
@@ -1671,6 +1802,7 @@ impl MultiTokenManager {
 
             entry.disabled = true;
             entry.disabled_reason = Some(DisabledReason::TooManyRefreshFailures);
+            self.affinity.remove_by_credential(id);
 
             tracing::error!(
                 "凭据 #{} Token 已连续刷新失败 {} 次，已被禁用",
@@ -1720,6 +1852,7 @@ impl MultiTokenManager {
             entry.last_used_at = Some(Utc::now().to_rfc3339());
             entry.disabled = true;
             entry.disabled_reason = Some(DisabledReason::InvalidRefreshToken);
+            self.affinity.remove_by_credential(id);
 
             tracing::error!(
                 "凭据 #{} refreshToken 已失效 (invalid_grant)，已立即禁用",
@@ -3322,7 +3455,7 @@ mod tests {
             });
         }
 
-        let (id, _) = manager.select_next_credential(None).unwrap();
+        let (id, _) = manager.select_next_credential(None, &[]).unwrap();
         // ID 自动分配从 1 开始；B 是第二个 → id=2
         assert_eq!(id, 2, "应选 Tier 1 的 B 而非 Tier 2 的 A");
     }
@@ -3351,7 +3484,7 @@ mod tests {
             }
         }
 
-        let (id, _) = manager.select_next_credential(None).unwrap();
+        let (id, _) = manager.select_next_credential(None, &[]).unwrap();
         // Tier 1 空 → 用 Tier 2 priority=0 的 A
         assert_eq!(id, 1);
     }
@@ -3380,9 +3513,115 @@ mod tests {
             // entries[1].usage_snapshot 保持 None
         }
 
-        let (id, _) = manager.select_next_credential(None).unwrap();
+        let (id, _) = manager.select_next_credential(None, &[]).unwrap();
         // 无 snapshot 的 B 进 Tier 1，应优先；A 有 snapshot 且超额进 Tier 2
         assert_eq!(id, 2);
+    }
+
+    #[test]
+    fn test_select_next_credential_excludes_failed_ids() {
+        // exclude_ids 内的凭据应被跳过（retry 不再选回上次失败的号）。
+        let manager = MultiTokenManager::new(
+            Config::default(),
+            vec![make_oauth_cred(0, "a"), make_oauth_cred(1, "b")],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        *manager.load_balancing_mode.lock() = "balanced".to_string();
+
+        {
+            let mut entries = manager.entries.lock();
+            entries[0].success_count = 1; // A 用得少，Least-Used 本会选 A(id=1)
+            entries[1].success_count = 100;
+        }
+
+        // 不排除时选 A(id=1)
+        assert_eq!(manager.select_next_credential(None, &[]).unwrap().0, 1);
+        // 排除 A 后只能选 B(id=2)
+        assert_eq!(manager.select_next_credential(None, &[1]).unwrap().0, 2);
+        // 两个都排除 → 无可用
+        assert!(manager.select_next_credential(None, &[1, 2]).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_affinity_pins_user_to_same_credential() {
+        // 同一 user_id 的连续请求应复用首次绑定的凭据（连续对话命中同号 prompt cache 前缀）。
+        // credential_rpm 调高让单号最小间隔降到 1ms，连续 acquire 间用小 sleep 越过即可，
+        // 避免默认 1s 间隔把 affinity 命中误判为"限流分流"。
+        let mut config = Config::default();
+        config.credential_rpm = Some(60_000);
+        let manager = MultiTokenManager::new(
+            config,
+            vec![
+                make_oauth_cred(0, "a"),
+                make_oauth_cred(1, "b"),
+                make_oauth_cred(2, "c"),
+            ],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        *manager.load_balancing_mode.lock() = "balanced".to_string();
+
+        let first = manager
+            .acquire_context_for_user(Some("user-x"), None)
+            .await
+            .unwrap()
+            .id;
+        // 首次请求应建立绑定
+        assert_eq!(manager.affinity.get("user-x"), Some(first));
+
+        // 即便后续该号 success_count 被拉高（Least-Used 本会选别的号），
+        // affinity 仍应复用首次绑定的号。
+        {
+            let mut entries = manager.entries.lock();
+            for e in entries.iter_mut() {
+                if e.id == first {
+                    e.success_count = 9999;
+                }
+            }
+        }
+
+        for _ in 0..5 {
+            tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+            let id = manager
+                .acquire_context_for_user(Some("user-x"), None)
+                .await
+                .unwrap()
+                .id;
+            assert_eq!(id, first, "同一 user 应复用绑定凭据");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_affinity_rebinds_when_excluded() {
+        // 绑定凭据进入 exclude_ids（retry 上次失败）时，应分流并重绑到别的号。
+        let manager = MultiTokenManager::new(
+            Config::default(),
+            vec![make_oauth_cred(0, "a"), make_oauth_cred(1, "b")],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        *manager.load_balancing_mode.lock() = "balanced".to_string();
+
+        let first = manager
+            .acquire_context_for_user(Some("user-y"), None)
+            .await
+            .unwrap()
+            .id;
+
+        // 把绑定号放进 exclude → 必须换到另一个号
+        let second = manager
+            .acquire_context_for_user_excluding(Some("user-y"), None, &[first])
+            .await
+            .unwrap()
+            .id;
+        assert_ne!(second, first, "排除绑定号后应分流到其他凭据");
     }
 
     #[test]

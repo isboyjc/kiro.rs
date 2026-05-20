@@ -182,13 +182,21 @@ impl KiroProvider {
     /// 发送非流式 API 请求
     ///
     /// 支持多凭据故障转移（见 [`Self::call_api_with_retry`]）
-    pub async fn call_api(&self, request_body: &str) -> anyhow::Result<ApiCallResult> {
-        self.call_api_with_retry(request_body, false).await
+    pub async fn call_api(
+        &self,
+        request_body: &str,
+        user_id: Option<&str>,
+    ) -> anyhow::Result<ApiCallResult> {
+        self.call_api_with_retry(request_body, false, user_id).await
     }
 
     /// 发送流式 API 请求
-    pub async fn call_api_stream(&self, request_body: &str) -> anyhow::Result<ApiCallResult> {
-        self.call_api_with_retry(request_body, true).await
+    pub async fn call_api_stream(
+        &self,
+        request_body: &str,
+        user_id: Option<&str>,
+    ) -> anyhow::Result<ApiCallResult> {
+        self.call_api_with_retry(request_body, true, user_id).await
     }
 
     /// 发送 MCP API 请求（WebSearch 等工具调用）
@@ -429,19 +437,27 @@ impl KiroProvider {
         &self,
         request_body: &str,
         is_stream: bool,
+        user_id: Option<&str>,
     ) -> anyhow::Result<ApiCallResult> {
         let total_credentials = self.token_manager.total_count();
         let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
         let mut last_error: Option<anyhow::Error> = None;
         let mut force_refreshed: HashSet<u64> = HashSet::new();
+        // retry 链路排除上次失败的凭据，避免 affinity 命中反复返回同一个失败的绑定凭据。
+        let mut failed_ids: Vec<u64> = Vec::new();
         let api_type = if is_stream { "流式" } else { "非流式" };
 
         // 尝试从请求体中提取模型信息
         let model = Self::extract_model_from_request(request_body);
 
         for attempt in 0..max_retries {
-            // 获取调用上下文（绑定 index、credentials、token）
-            let ctx = match self.token_manager.acquire_context(model.as_deref()).await {
+            // 获取调用上下文：带用户亲和性，同一 user_id 的连续对话尽量复用同一凭据，
+            // 复用上游 prompt cache 前缀（否则 balanced 轮换会导致只有写、没有读）。
+            let ctx = match self
+                .token_manager
+                .acquire_context_for_user_excluding(user_id, model.as_deref(), &failed_ids)
+                .await
+            {
                 Ok(c) => c,
                 Err(e) => {
                     last_error = Some(e);
@@ -646,6 +662,8 @@ impl KiroProvider {
                     status,
                     body
                 ));
+                // 凭据可能尚未达到禁用阈值；排除它，避免 affinity 在本次 retry 反复选回
+                failed_ids.push(ctx.id);
                 continue;
             }
 
