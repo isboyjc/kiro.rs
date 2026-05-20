@@ -30,6 +30,16 @@ use crate::kiro::provider::ApiCallResult;
 use super::types::{CountTokensRequest, CountTokensResponse, ErrorResponse, MessagesRequest, Model, ModelsResponse, OutputConfig, Thinking};
 use super::websearch;
 
+/// 阶段 7.18：把总输入 token 转为 Anthropic usage 的 input_tokens 口径（剔除 cache 读写）。
+/// 总 prompt = input_tokens(未缓存) + cache_read + cache_creation，对外暴露的 input_tokens
+/// 必须扣掉缓存部分，否则客户端会重复计入缓存。
+fn billed_input_tokens(input_tokens: i32, c: Option<&CacheResult>) -> i32 {
+    let (cc, cr) = c
+        .map(|c| (c.cache_creation_input_tokens, c.cache_read_input_tokens))
+        .unwrap_or((0, 0));
+    input_tokens.saturating_sub(cc).saturating_sub(cr).max(0)
+}
+
 /// 阶段 7.14：把 CacheResult 注入到 usage JSON 对象
 fn inject_cache_usage(usage: &mut serde_json::Value, c: &CacheResult) {
     usage["cache_creation_input_tokens"] = json!(c.cache_creation_input_tokens);
@@ -732,10 +742,12 @@ async fn handle_non_stream_request(
 
     // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
     let final_input_tokens = context_input_tokens.unwrap_or(input_tokens);
+    // 阶段 7.18：对外 input_tokens 按 Anthropic 口径剔除 cache 读写
+    let billed_input = billed_input_tokens(final_input_tokens, cache_usage.as_ref());
 
     // 构建 Anthropic 响应
     let mut usage = json!({
-        "input_tokens": final_input_tokens,
+        "input_tokens": billed_input,
         "output_tokens": output_tokens
     });
     // 阶段 7.14：注入 prompt cache 字段
@@ -769,7 +781,7 @@ async fn handle_non_stream_request(
             retry_attempt: call_retry,
             is_stream: false,
             error_summary: None,
-            input_tokens: Some(final_input_tokens),
+            input_tokens: Some(billed_input),
             output_tokens: Some(output_tokens),
             cache_read_input_tokens: cache_read,
             cache_creation_input_tokens: cache_creation,

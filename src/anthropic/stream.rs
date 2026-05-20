@@ -458,6 +458,7 @@ impl SseStateManager {
         &mut self,
         input_tokens: i32,
         output_tokens: i32,
+        cache_usage: Option<&super::cache_tracker::CacheResult>,
     ) -> Vec<SseEvent> {
         let mut events = Vec::new();
 
@@ -478,6 +479,20 @@ impl SseStateManager {
         // 发送 message_delta
         if !self.message_delta_sent {
             self.message_delta_sent = true;
+            // 阶段 7.18：input_tokens 剔除 cache 读写，并把 cache 字段镜像到 message_delta
+            let (cc, cr) = cache_creation_read(cache_usage);
+            let mut usage = json!({
+                "input_tokens": billed_input_tokens(input_tokens, cc, cr),
+                "output_tokens": output_tokens
+            });
+            if let Some(c) = cache_usage {
+                usage["cache_creation_input_tokens"] = json!(c.cache_creation_input_tokens);
+                usage["cache_read_input_tokens"] = json!(c.cache_read_input_tokens);
+                usage["cache_creation"] = json!({
+                    "ephemeral_5m_input_tokens": c.cache_creation_5m_input_tokens,
+                    "ephemeral_1h_input_tokens": c.cache_creation_1h_input_tokens,
+                });
+            }
             events.push(SseEvent::new(
                 "message_delta",
                 json!({
@@ -486,10 +501,7 @@ impl SseStateManager {
                         "stop_reason": self.get_stop_reason(),
                         "stop_sequence": null
                     },
-                    "usage": {
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens
-                    }
+                    "usage": usage
                 }),
             ));
         }
@@ -609,11 +621,14 @@ impl StreamContext {
         let Some(p) = self.pending_model_call_log.take() else {
             return;
         };
-        let input = self.context_input_tokens.unwrap_or(self.input_tokens);
+        let raw_input = self.context_input_tokens.unwrap_or(self.input_tokens);
         let (cache_read, cache_creation) = match &self.cache_usage {
             Some(c) => (Some(c.cache_read_input_tokens), Some(c.cache_creation_input_tokens)),
             None => (None, None),
         };
+        // 阶段 7.18：日志中的 input_tokens 与对外 usage 口径保持一致（剔除 cache 读写）
+        let (cc, cr) = cache_creation_read(self.cache_usage.as_ref());
+        let input = billed_input_tokens(raw_input, cc, cr);
         p.log_ring.record_model_call(crate::common::log_ring::ModelCallMeta {
             credential_id: p.credential_id,
             model: p.model,
@@ -633,8 +648,10 @@ impl StreamContext {
 
     /// 生成 message_start 事件
     pub fn create_message_start_event(&self) -> serde_json::Value {
+        // 阶段 7.18：input_tokens 采用 Anthropic 口径，剔除 cache 读写部分
+        let (cc, cr) = cache_creation_read(self.cache_usage.as_ref());
         let mut usage = json!({
-            "input_tokens": self.input_tokens,
+            "input_tokens": billed_input_tokens(self.input_tokens, cc, cr),
             "output_tokens": 1
         });
         // 阶段 7.14：注入 prompt cache 字段（accounting 开启时）
@@ -1191,10 +1208,11 @@ impl StreamContext {
         let final_input_tokens = self.context_input_tokens.unwrap_or(self.input_tokens);
 
         // 生成最终事件
-        events.extend(
-            self.state_manager
-                .generate_final_events(final_input_tokens, self.output_tokens),
-        );
+        events.extend(self.state_manager.generate_final_events(
+            final_input_tokens,
+            self.output_tokens,
+            self.cache_usage.as_ref(),
+        ));
         events
     }
 }
@@ -1293,13 +1311,16 @@ impl BufferedStreamContext {
             .inner
             .context_input_tokens
             .unwrap_or(self.estimated_input_tokens);
+        // 阶段 7.18：更正后的 input_tokens 同样按 Anthropic 口径剔除 cache 读写
+        let (cc, cr) = cache_creation_read(self.inner.cache_usage.as_ref());
+        let billed = billed_input_tokens(final_input_tokens, cc, cr);
 
         // 更正 message_start 事件中的 input_tokens
         for event in &mut self.event_buffer {
             if event.event == "message_start" {
                 if let Some(message) = event.data.get_mut("message") {
                     if let Some(usage) = message.get_mut("usage") {
-                        usage["input_tokens"] = serde_json::json!(final_input_tokens);
+                        usage["input_tokens"] = serde_json::json!(billed);
                     }
                 }
             }
@@ -1310,6 +1331,24 @@ impl BufferedStreamContext {
 
         std::mem::take(&mut self.event_buffer)
     }
+}
+
+/// 阶段 7.18：把总输入 token 转为 Anthropic usage 的 input_tokens 口径（剔除 cache 读写）。
+///
+/// Anthropic 约定：总 prompt = input_tokens(未缓存) + cache_read + cache_creation。
+/// 因此对外暴露的 input_tokens 必须扣掉缓存读写部分，否则客户端会把缓存重复计入。
+fn billed_input_tokens(input_tokens: i32, cache_creation: i32, cache_read: i32) -> i32 {
+    input_tokens
+        .saturating_sub(cache_creation)
+        .saturating_sub(cache_read)
+        .max(0)
+}
+
+/// 从可选 CacheResult 取 (creation, read)，None 时为 (0, 0)
+fn cache_creation_read(cache: Option<&super::cache_tracker::CacheResult>) -> (i32, i32) {
+    cache
+        .map(|c| (c.cache_creation_input_tokens, c.cache_read_input_tokens))
+        .unwrap_or((0, 0))
 }
 
 /// 简单的 token 估算
@@ -1336,6 +1375,57 @@ fn estimate_tokens(text: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::cache_tracker::CacheResult;
+
+    #[test]
+    fn test_billed_input_tokens_subtracts_cache() {
+        // 总输入 = 未缓存 + cache_read + cache_creation
+        assert_eq!(billed_input_tokens(3829, 0, 1788), 2041);
+        assert_eq!(billed_input_tokens(4131, 544, 2544), 1043);
+        // 缓存大于总数时 clamp 到 0
+        assert_eq!(billed_input_tokens(10, 3, 20), 0);
+        // 无缓存时不变
+        assert_eq!(billed_input_tokens(500, 0, 0), 500);
+    }
+
+    #[test]
+    fn test_message_start_input_tokens_excludes_cache_and_keeps_cache_fields() {
+        let cache = CacheResult {
+            cache_read_input_tokens: 1788,
+            cache_creation_input_tokens: 100,
+            cache_creation_5m_input_tokens: 100,
+            cache_creation_1h_input_tokens: 0,
+        };
+        let ctx = StreamContext::new_with_thinking("claude-sonnet-4-6", 3829, false, HashMap::new())
+            .with_cache_usage(Some(cache));
+        let event = ctx.create_message_start_event();
+        let usage = &event["message"]["usage"];
+        // 3829 - 100 - 1788 = 1941
+        assert_eq!(usage["input_tokens"], json!(1941));
+        assert_eq!(usage["cache_read_input_tokens"], json!(1788));
+        assert_eq!(usage["cache_creation_input_tokens"], json!(100));
+    }
+
+    #[test]
+    fn test_message_delta_carries_cache_and_billed_input() {
+        let cache = CacheResult {
+            cache_read_input_tokens: 800,
+            cache_creation_input_tokens: 0,
+            cache_creation_5m_input_tokens: 0,
+            cache_creation_1h_input_tokens: 0,
+        };
+        let mut mgr = SseStateManager::new();
+        let events = mgr.generate_final_events(1000, 50, Some(&cache));
+        let delta = events
+            .iter()
+            .find(|e| e.event == "message_delta")
+            .expect("should emit message_delta");
+        let usage = &delta.data["usage"];
+        // 1000 - 0 - 800 = 200
+        assert_eq!(usage["input_tokens"], json!(200));
+        assert_eq!(usage["cache_read_input_tokens"], json!(800));
+        assert_eq!(usage["output_tokens"], json!(50));
+    }
 
     #[test]
     fn test_sse_event_format() {
