@@ -13,7 +13,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { storage } from '@/lib/storage'
 import { extractErrorMessage } from '@/lib/utils'
-import { useConfigRaw, useConfigSchema, useUpdateConfig, useValidateConfig } from '@/hooks/use-config'
+import { useConfig, useConfigRaw, useConfigSchema, useUpdateConfig, useValidateConfig } from '@/hooks/use-config'
 import type { ConfigFieldError, ConfigJson, ConfigUpdateResponse } from '@/types/api'
 import { ConfigForm } from '@/components/config-form'
 
@@ -49,19 +49,25 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   /** 阶段 7.8：可视化表单字段级校验结果（path → 错误消息） */
   const [formErrors, setFormErrors] = useState<Record<string, string>>({})
 
-  const { data: rawData, isLoading: isLoadingRaw, refetch: refetchRaw } = useConfigRaw(open)
+  // 结构化 config（serde 已补全所有默认值）作为编辑数据源，避免最小化
+  // config.json 在表单里显示空白字段
+  const { data: configData, isLoading: isLoadingConfig, refetch: refetchConfig } = useConfig(open)
+  // raw 仅用于展示文件路径
+  const { data: rawData, refetch: refetchRaw } = useConfigRaw(open)
   const { data: schemaData, isLoading: isLoadingSchema } = useConfigSchema(open)
   const { mutateAsync: validateMutate, isPending: isValidating } = useValidateConfig()
   const { mutateAsync: updateMutate, isPending: isUpdating } = useUpdateConfig()
+  const isLoadingRaw = isLoadingConfig
 
-  // 打开时同步 raw 文本到本地编辑状态
+  // 打开时把"补全默认值后的 config"序列化为编辑文本（Raw / 表单共用）
   useEffect(() => {
-    if (open && rawData?.content) {
-      setText(rawData.content)
-      setOriginalText(rawData.content)
+    if (open && configData) {
+      const filled = JSON.stringify(configData, null, 2)
+      setText(filled)
+      setOriginalText(filled)
       setValidation(EMPTY_VALIDATION)
     }
-  }, [open, rawData?.content])
+  }, [open, configData])
 
   // 关闭时重置
   useEffect(() => {
@@ -151,6 +157,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     }
 
     // 3) 刷新本地缓存
+    refetchConfig()
     refetchRaw()
     setShowAdminConfirm(false)
     setPendingPayload(null)

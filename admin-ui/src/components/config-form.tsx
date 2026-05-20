@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AlertCircle, Eye, EyeOff } from 'lucide-react'
+import { AlertCircle, Eye, EyeOff, RotateCcw } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
@@ -124,6 +124,19 @@ function GroupCard({
     0
   )
 
+  // 阶段 7.13：仅当组内有字段带 defaultValue 时才显示"恢复默认"
+  // （鉴权类字段无 defaultValue → 不会被重置，保护 apiKey/adminApiKey）
+  const resettableFields = group.fields.filter((f) => f.defaultValue !== undefined)
+  const canRestore = resettableFields.length > 0
+
+  const handleRestoreDefaults = () => {
+    let next = value
+    for (const f of resettableFields) {
+      next = setByPath(next, f.key, f.defaultValue)
+    }
+    onChange(next)
+  }
+
   return (
     <div className={`rounded-lg border bg-card overflow-hidden ${groupErrorCount > 0 ? 'border-red-300' : ''}`}>
       <div className="flex items-center justify-between px-3 py-2 bg-muted/30">
@@ -143,7 +156,20 @@ function GroupCard({
             )}
           </div>
         </div>
-        <GroupBadge needsRestart={group.needsRestart} sensitive={group.sensitive} />
+        <div className="flex items-center gap-1.5 shrink-0">
+          {canRestore && (
+            <button
+              type="button"
+              onClick={handleRestoreDefaults}
+              className="inline-flex items-center gap-1 h-6 px-2 text-[11px] rounded text-muted-foreground hover:text-foreground hover:bg-muted transition"
+              title={`恢复本组 ${resettableFields.length} 个字段到默认值`}
+            >
+              <RotateCcw className="h-3 w-3" />
+              恢复默认
+            </button>
+          )}
+          <GroupBadge needsRestart={group.needsRestart} sensitive={group.sensitive} />
+        </div>
       </div>
       <div className="p-3 space-y-2.5">
         {group.fields.map((f) => (
