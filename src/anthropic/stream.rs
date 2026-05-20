@@ -558,6 +558,9 @@ pub struct StreamContext {
     pub cache_usage: Option<super::cache_tracker::CacheResult>,
     /// 阶段 7.15：流结束时记录带 token 的 ModelCall 日志（None = 未注入 log_ring）
     pub pending_model_call_log: Option<PendingModelCallLog>,
+    /// Phase B：并发槽 guard。随本 StreamContext 存活——SSE 流结束 / 客户端断连时
+    /// 一并 Drop，归还在飞计数。仅持有，不主动使用。
+    pub concurrency_slot: Option<crate::kiro::concurrency::InFlightGuard>,
 }
 
 /// 阶段 7.15：流式调用结束后补记 ModelCall 日志所需的元数据
@@ -597,6 +600,7 @@ impl StreamContext {
             strip_thinking_leading_newline: false,
             cache_usage: None,
             pending_model_call_log: None,
+            concurrency_slot: None,
         }
     }
 
@@ -606,6 +610,15 @@ impl StreamContext {
         cache_usage: Option<super::cache_tracker::CacheResult>,
     ) -> Self {
         self.cache_usage = cache_usage;
+        self
+    }
+
+    /// Phase B：链式注入并发槽 guard（随流结束 Drop 归还在飞计数）
+    pub fn with_concurrency_slot(
+        mut self,
+        slot: Option<crate::kiro::concurrency::InFlightGuard>,
+    ) -> Self {
+        self.concurrency_slot = slot;
         self
     }
 
@@ -1269,6 +1282,15 @@ impl BufferedStreamContext {
     /// emit 由 finish_and_get_all_events 内部调 inner.emit_model_call_log 触发
     pub fn with_model_call_log(mut self, pending: Option<PendingModelCallLog>) -> Self {
         self.inner.pending_model_call_log = pending;
+        self
+    }
+
+    /// Phase B：注入并发槽 guard（委托给 inner，随流结束 Drop 归还）
+    pub fn with_concurrency_slot(
+        mut self,
+        slot: Option<crate::kiro::concurrency::InFlightGuard>,
+    ) -> Self {
+        self.inner.concurrency_slot = slot;
         self
     }
 

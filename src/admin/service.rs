@@ -1016,6 +1016,10 @@ impl AdminService {
                 new_config.rl429_backoff_multiplier_milli,
             );
         }
+        if new_config.max_concurrent_per_credential != old_config.max_concurrent_per_credential {
+            self.token_manager
+                .update_concurrency_config(new_config.max_concurrent_per_credential);
+        }
         if new_config.log_buffer_capacity != old_config.log_buffer_capacity {
             let cap = new_config
                 .log_buffer_capacity
@@ -1132,6 +1136,7 @@ fn diff_config_fields(old: &Config, new: &Config) -> (Vec<String>, Vec<String>) 
     diff!(rl429_backoff_base_ms, "rl429BackoffBaseMs", hot);
     diff!(rl429_backoff_max_ms, "rl429BackoffMaxMs", hot);
     diff!(rl429_backoff_multiplier_milli, "rl429BackoffMultiplierMilli", hot);
+    diff!(max_concurrent_per_credential, "maxConcurrentPerCredential", hot);
     diff!(log_buffer_capacity, "logBufferCapacity", hot);
     // 鉴权类：通过 RwLock 热轮换
     diff!(api_key, "apiKey", hot);
@@ -1368,6 +1373,18 @@ fn build_config_schema() -> ConfigSchemaResponse {
                     ],
                     default_value: Some(json!("priority")),
                     ..field("loadBalancingMode", "负载均衡", "enum", false, "热生效")
+                },
+                ConfigSchemaField {
+                    min: Some(0.0),
+                    max: Some(100.0),
+                    default_value: Some(json!(5)),
+                    ..field(
+                        "maxConcurrentPerCredential",
+                        "单凭据最大并发",
+                        "number",
+                        false,
+                        "单凭据同时在飞请求数上限（AI 长响应下比 RPM 更准的负载控制）。超过的凭据本轮不可选，自动分流到其他号；balanced 模式下也按在飞数最少选号。0 = 不限并发。默认 5",
+                    )
                 },
                 ConfigSchemaField {
                     nullable: true,

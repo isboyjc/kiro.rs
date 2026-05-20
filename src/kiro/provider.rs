@@ -61,6 +61,9 @@ pub struct ApiCallResult {
     pub model: Option<String>,
     /// 第几次重试命中（0 = 首次）
     pub retry_attempt: u32,
+    /// Phase B：并发槽 RAII guard。需随响应生命周期持有——流式移入 StreamContext，
+    /// 非流式持有到响应构建完成；Drop 时归还在飞计数。
+    pub slot: Option<crate::kiro::concurrency::InFlightGuard>,
 }
 
 impl KiroProvider {
@@ -478,6 +481,18 @@ impl KiroProvider {
                 }
             };
 
+            // Phase B：占用该凭据一个并发槽。已满（选号后被并发抢满的竞态）→ 本轮排除，
+            // 换号重试。slot 是本次 attempt 的本地变量：失败 continue 时 Drop 归还，
+            // 成功时移入 ApiCallResult 随响应/流生命周期持有。
+            let slot = match self.token_manager.try_acquire_concurrency(ctx.id) {
+                Some(g) => g,
+                None => {
+                    tracing::debug!(credential_id = ctx.id, "凭据并发已满，换号重试");
+                    failed_ids.push(ctx.id);
+                    continue;
+                }
+            };
+
             let config = self.token_manager.config();
             let machine_id = machine_id::generate_from_credentials(&ctx.credentials, config);
 
@@ -568,6 +583,8 @@ impl KiroProvider {
                     endpoint_name: endpoint_name_owned.clone(),
                     model: model.clone(),
                     retry_attempt: attempt as u32,
+                    // 移交并发槽：随响应/流生命周期持有，结束后 Drop 归还
+                    slot: Some(slot),
                 });
             }
 

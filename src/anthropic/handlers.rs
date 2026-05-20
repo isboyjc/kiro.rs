@@ -431,7 +431,7 @@ async fn handle_stream_request(
     user_id: Option<&str>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
-    let api_result = match provider.call_api_stream(request_body, user_id).await {
+    let mut api_result = match provider.call_api_stream(request_body, user_id).await {
         Ok(r) => r,
         Err(e) => return map_provider_error(e),
     };
@@ -440,11 +440,14 @@ async fn handle_stream_request(
     let cache_usage = resolve_and_record_cache(&cache_tracker, &cache_profile, api_result.credential_id);
     // 阶段 7.15：构造流结束后补记 ModelCall 日志的元数据
     let pending_log = build_pending_log(log_ring, &api_result, "anthropic_stream");
+    // Phase B：并发槽移入 StreamContext，随 SSE 流结束/断连 Drop 归还在飞计数
+    let slot = api_result.slot.take();
 
     // 创建流处理上下文
     let mut ctx = StreamContext::new_with_thinking(model, input_tokens, thinking_enabled, tool_name_map)
         .with_cache_usage(cache_usage)
-        .with_model_call_log(pending_log);
+        .with_model_call_log(pending_log)
+        .with_concurrency_slot(slot);
 
     // 生成初始事件
     let initial_events = ctx.generate_initial_events();
@@ -583,10 +586,13 @@ async fn handle_non_stream_request(
     user_id: Option<&str>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
-    let api_result = match provider.call_api(request_body, user_id).await {
+    let mut api_result = match provider.call_api(request_body, user_id).await {
         Ok(r) => r,
         Err(e) => return map_provider_error(e),
     };
+
+    // Phase B：非流式请求持有并发槽到响应构建完成，函数返回时 Drop 归还在飞计数
+    let _concurrency_slot = api_result.slot.take();
 
     // 阶段 7.14：拿到实际凭据后计算并记录 cache 使用
     let cache_usage = resolve_and_record_cache(&cache_tracker, &cache_profile, api_result.credential_id);
@@ -1050,7 +1056,7 @@ async fn handle_stream_request_buffered(
     user_id: Option<&str>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
-    let api_result = match provider.call_api_stream(request_body, user_id).await {
+    let mut api_result = match provider.call_api_stream(request_body, user_id).await {
         Ok(r) => r,
         Err(e) => return map_provider_error(e),
     };
@@ -1059,11 +1065,14 @@ async fn handle_stream_request_buffered(
     let cache_usage = resolve_and_record_cache(&cache_tracker, &cache_profile, api_result.credential_id);
     // 阶段 7.15：cc 流式标记 api_type
     let pending_log = build_pending_log(log_ring, &api_result, "anthropic_cc_stream");
+    // Phase B：并发槽移入缓冲流上下文，随流结束/断连 Drop 归还
+    let slot = api_result.slot.take();
 
     // 创建缓冲流处理上下文
     let ctx = BufferedStreamContext::new(model, estimated_input_tokens, thinking_enabled, tool_name_map)
         .with_cache_usage(cache_usage)
-        .with_model_call_log(pending_log);
+        .with_model_call_log(pending_log)
+        .with_concurrency_slot(slot);
 
     // 创建缓冲 SSE 流
     let stream = create_buffered_sse_stream(api_result.response, ctx);

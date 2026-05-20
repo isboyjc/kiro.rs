@@ -20,6 +20,7 @@ use std::time::{Duration as StdDuration, Instant};
 use crate::http_client::{ProxyConfig, build_client};
 use crate::kiro::affinity::UserAffinityManager;
 use crate::kiro::background_refresh::BackgroundRefresher;
+use crate::kiro::concurrency::{ConcurrencyLimiter, InFlightGuard};
 use crate::kiro::cooldown::{CooldownManager, CooldownReason};
 use crate::kiro::fingerprint::Fingerprint;
 use crate::kiro::machine_id;
@@ -819,6 +820,8 @@ pub struct MultiTokenManager {
     /// 冷却管理器（429 退避 / 临时禁用）
     #[allow(dead_code)]
     cooldown_manager: CooldownManager,
+    /// 单凭据并发限制器（Phase B：在飞请求数 ≤ N）
+    concurrency: Arc<ConcurrencyLimiter>,
     /// 后台 token 刷新器（启动后周期检查过期凭据）
     #[allow(dead_code)]
     background_refresher: Option<Arc<BackgroundRefresher>>,
@@ -962,6 +965,8 @@ impl MultiTokenManager {
             config.rl429_backoff_max_ms,
             config.rl429_backoff_multiplier_milli,
         );
+        // Phase B：单凭据并发上限
+        let max_concurrent = config.max_concurrent_per_credential;
         let manager = Self {
             config,
             proxy,
@@ -977,6 +982,7 @@ impl MultiTokenManager {
             affinity: UserAffinityManager::new(),
             rate_limiter: RateLimiter::new(rate_limit_config),
             cooldown_manager: CooldownManager::new(),
+            concurrency: ConcurrencyLimiter::new(max_concurrent),
             background_refresher: None,
         };
         manager
@@ -1056,6 +1062,10 @@ impl MultiTokenManager {
                 if self.rate_limiter.check_rate_limit(e.id).is_err() {
                     return false;
                 }
+                // Phase B：跳过已达并发上限的凭据（真正占槽由 provider 选定后调用）
+                if self.concurrency.is_full(e.id) {
+                    return false;
+                }
                 true
             })
             .collect();
@@ -1079,11 +1089,15 @@ impl MultiTokenManager {
 
         match mode {
             "balanced" => {
-                // Least-Used 策略：选择成功次数最少的凭据
-                // 平局时按优先级排序（数字越小优先级越高）
-                let entry = pool
-                    .into_iter()
-                    .min_by_key(|e| (e.success_count, e.credentials.priority))?;
+                // Phase B：优先选「当前在飞最少」的凭据（长响应下比 RPM 更准的分散依据），
+                // 平局再按累计成功次数（Least-Used）、最后按优先级。
+                let entry = pool.into_iter().min_by_key(|e| {
+                    (
+                        self.concurrency.in_flight(e.id),
+                        e.success_count,
+                        e.credentials.priority,
+                    )
+                })?;
 
                 Some((entry.id, entry.credentials.clone()))
             }
@@ -1152,6 +1166,7 @@ impl MultiTokenManager {
                                 && !e.disabled
                                 && self.cooldown_manager.check_cooldown(e.id).is_none()
                                 && self.rate_limiter.check_rate_limit(e.id).is_ok()
+                                && !self.concurrency.is_full(e.id)
                         })
                         .map(|e| (e.id, e.credentials.clone()))
                 };
@@ -1306,6 +1321,13 @@ impl MultiTokenManager {
                         remaining_ms = remaining.as_millis() as u64,
                         keep_affinity_binding,
                         "亲和性绑定凭据处于冷却，本次将分流"
+                    );
+                } else if self.concurrency.is_full(bound_id) {
+                    // Phase B：绑定凭据并发已满 → 本次分流到别的号，但保留绑定（下次回来）
+                    keep_affinity_binding = true;
+                    tracing::debug!(
+                        credential_id = bound_id,
+                        "亲和性绑定凭据并发已满，本次将分流"
                     );
                 } else if self.rate_limiter.check_rate_limit(bound_id).is_err() {
                     // 只读检查，不消耗配额
@@ -1724,6 +1746,18 @@ impl MultiTokenManager {
     #[allow(dead_code)] // Phase A：429 路径已改走短退避，不再调用；保留供其他失败场景复用
     pub fn report_rate_limiter_failure(&self, id: u64, error_message: Option<&str>) {
         self.rate_limiter.record_failure(id, error_message);
+    }
+
+    /// Phase B：尝试为该凭据占用一个并发槽（在飞 +1）。已满返回 None。
+    /// 返回的 guard 必须随请求生命周期持有，Drop 时自动归还。
+    pub fn try_acquire_concurrency(&self, id: u64) -> Option<InFlightGuard> {
+        self.concurrency.try_acquire(id)
+    }
+
+    /// Phase B：热更新单凭据最大并发（0 = 不限）
+    pub fn update_concurrency_config(&self, max_per_credential: u32) {
+        self.concurrency.set_max(max_per_credential);
+        tracing::info!(max_per_credential, "单凭据并发上限已热更新");
     }
 
     /// 热更新 429 短退避参数（Phase A：Admin UI 可改 / 恢复默认）。
@@ -3645,6 +3679,56 @@ mod tests {
             .unwrap()
             .id;
         assert_ne!(second, first, "排除绑定号后应分流到其他凭据");
+    }
+
+    #[test]
+    fn test_concurrency_full_credential_skipped() {
+        // 并发上限=1：占满某号后，选号应跳过它；释放后又可选。
+        let mut config = Config::default();
+        config.max_concurrent_per_credential = 1;
+        let manager = MultiTokenManager::new(
+            config,
+            vec![make_oauth_cred(0, "a"), make_oauth_cred(1, "b")],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        *manager.load_balancing_mode.lock() = "balanced".to_string();
+
+        let g = manager.try_acquire_concurrency(1).unwrap(); // 占满 id=1
+        assert_eq!(
+            manager.select_next_credential(None, &[]).unwrap().0,
+            2,
+            "已满的号应被跳过"
+        );
+        drop(g);
+        assert_eq!(
+            manager.select_next_credential(None, &[]).unwrap().0,
+            1,
+            "释放后又可选"
+        );
+    }
+
+    #[test]
+    fn test_balanced_prefers_least_in_flight() {
+        // 默认并发上限 5（不满）：balanced 应优先选在飞最少的号。
+        let manager = MultiTokenManager::new(
+            Config::default(),
+            vec![make_oauth_cred(0, "a"), make_oauth_cred(1, "b")],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        *manager.load_balancing_mode.lock() = "balanced".to_string();
+
+        let _g = manager.try_acquire_concurrency(1).unwrap(); // id=1 在飞 1
+        assert_eq!(
+            manager.select_next_credential(None, &[]).unwrap().0,
+            2,
+            "应选在飞更少的 id=2"
+        );
     }
 
     #[test]

@@ -126,6 +126,14 @@ pub struct Config {
     #[serde(default = "default_rl429_backoff_max_ms")]
     pub rl429_backoff_max_ms: u64,
 
+    /// 单凭据最大并发（在飞请求数）—— Phase B
+    ///
+    /// AI 流式响应耗时长，RPM 无法准确反映负载；真正约束是「同时在飞的请求数」。
+    /// 选号时占一个槽、请求/流结束归还，超过此数的凭据本轮不可选，自动分流到其他号。
+    /// `0` = 不限并发（退回纯 RPM 模型）。默认 5。
+    #[serde(default = "default_max_concurrent_per_credential")]
+    pub max_concurrent_per_credential: u32,
+
     /// 429 短退避倍数（千分比）—— Phase A
     ///
     /// 每连续命中一次 ×(此值/1000)，封顶 max。用整数千分比而非浮点，方便 Admin UI
@@ -233,6 +241,10 @@ fn default_rl429_backoff_multiplier_milli() -> u64 {
     1500
 }
 
+fn default_max_concurrent_per_credential() -> u32 {
+    5
+}
+
 fn default_extract_thinking() -> bool {
     true
 }
@@ -268,6 +280,7 @@ impl Default for Config {
             rl429_backoff_base_ms: default_rl429_backoff_base_ms(),
             rl429_backoff_max_ms: default_rl429_backoff_max_ms(),
             rl429_backoff_multiplier_milli: default_rl429_backoff_multiplier_milli(),
+            max_concurrent_per_credential: default_max_concurrent_per_credential(),
             log_buffer_capacity: None,
             extract_thinking: default_extract_thinking(),
             default_endpoint: default_endpoint(),

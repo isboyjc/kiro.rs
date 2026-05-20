@@ -2,6 +2,7 @@
 
 pub mod affinity;
 pub mod background_refresh;
+pub mod concurrency;
 pub mod cooldown;
 pub mod endpoint;
 pub mod fingerprint;
