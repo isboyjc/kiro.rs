@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react'
 import {
   Dialog,
   DialogContent,
@@ -5,11 +6,18 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
-import { Loader2, AlertCircle, Boxes } from 'lucide-react'
+import { Loader2, AlertCircle, Boxes, CheckCircle2, XCircle, Play } from 'lucide-react'
 import { useCredentialBalance, useCredentialModels } from '@/hooks/use-credentials'
+import { testCredentialModel } from '@/api/credentials'
 import { parseError } from '@/lib/utils'
 import type { CredentialStatusItem } from '@/types/api'
+
+type TestState =
+  | { status: 'loading' }
+  | { status: 'ok'; reply: string; durationMs: number }
+  | { status: 'error'; message: string }
 
 interface CredentialDetailDialogProps {
   credential: CredentialStatusItem | null
@@ -52,6 +60,29 @@ export function CredentialDetailDialog({ credential, open, onOpenChange }: Crede
   const id = credential?.id ?? null
   const { data: balance, isLoading: balLoading, error: balError } = useCredentialBalance(open ? id : null)
   const { data: modelsResp, isLoading: modelsLoading, error: modelsError } = useCredentialModels(open ? id : null)
+  const [tests, setTests] = useState<Record<string, TestState>>({})
+
+  // 切换凭据时清空测试结果，避免串号展示
+  useEffect(() => {
+    setTests({})
+  }, [id])
+
+  const handleTest = async (modelId: string) => {
+    if (id === null) return
+    setTests((prev) => ({ ...prev, [modelId]: { status: 'loading' } }))
+    try {
+      const result = await testCredentialModel(id, modelId)
+      setTests((prev) => ({
+        ...prev,
+        [modelId]: { status: 'ok', reply: result.reply, durationMs: result.durationMs },
+      }))
+    } catch (e) {
+      setTests((prev) => ({
+        ...prev,
+        [modelId]: { status: 'error', message: parseError(e).title },
+      }))
+    }
+  }
 
   if (!credential) return null
 
@@ -179,20 +210,55 @@ export function CredentialDetailDialog({ credential, open, onOpenChange }: Crede
               </div>
             ) : modelsResp && modelsResp.models.length > 0 ? (
               <div className="space-y-1.5">
-                {modelsResp.models.map((m) => (
-                  <div key={m.modelId} className="flex items-center justify-between gap-2 text-xs py-1 border-b border-border/40 last:border-0">
-                    <div className="min-w-0">
-                      <div className="font-medium truncate">{m.modelName || m.modelId}</div>
-                      <div className="font-mono text-[10px] text-muted-foreground truncate">{m.modelId}</div>
-                    </div>
-                    <div className="shrink-0 text-right text-[10px] text-muted-foreground">
-                      {m.rateMultiplier != null && <div>×{m.rateMultiplier} 费率</div>}
-                      {m.tokenLimits?.maxInputTokens != null && (
-                        <div>{(m.tokenLimits.maxInputTokens / 1000).toFixed(0)}K ctx</div>
+                {modelsResp.models.map((m) => {
+                  const t = tests[m.modelId]
+                  return (
+                    <div key={m.modelId} className="py-1 border-b border-border/40 last:border-0">
+                      <div className="flex items-center justify-between gap-2 text-xs">
+                        <div className="min-w-0">
+                          <div className="font-medium truncate">{m.modelName || m.modelId}</div>
+                          <div className="font-mono text-[10px] text-muted-foreground truncate">{m.modelId}</div>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <div className="text-right text-[10px] text-muted-foreground">
+                            {m.rateMultiplier != null && <div>×{m.rateMultiplier} 费率</div>}
+                            {m.tokenLimits?.maxInputTokens != null && (
+                              <div>{(m.tokenLimits.maxInputTokens / 1000).toFixed(0)}K ctx</div>
+                            )}
+                          </div>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-6 px-2 text-[10px]"
+                            disabled={t?.status === 'loading'}
+                            onClick={() => handleTest(m.modelId)}
+                          >
+                            {t?.status === 'loading' ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <Play className="h-3 w-3" />
+                            )}
+                            <span className="ml-1">测试</span>
+                          </Button>
+                        </div>
+                      </div>
+                      {t?.status === 'ok' && (
+                        <div className="mt-1 flex items-start gap-1 text-[10px] text-green-600">
+                          <CheckCircle2 className="h-3 w-3 mt-px shrink-0" />
+                          <span className="break-all">
+                            可用（{t.durationMs}ms）：{t.reply}
+                          </span>
+                        </div>
+                      )}
+                      {t?.status === 'error' && (
+                        <div className="mt-1 flex items-start gap-1 text-[10px] text-red-500">
+                          <XCircle className="h-3 w-3 mt-px shrink-0" />
+                          <span className="break-all">{t.message}</span>
+                        </div>
                       )}
                     </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             ) : (
               <div className="text-xs text-muted-foreground">无可用模型数据</div>

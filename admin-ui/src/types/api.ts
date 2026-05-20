@@ -205,6 +205,14 @@ export interface ModelsResponse {
   models: ModelInfo[]
 }
 
+// 阶段 7.17：模型连通性测试结果
+export interface TestModelResult {
+  /** 助手回复文本（已截断） */
+  reply: string
+  /** 端到端耗时（毫秒） */
+  durationMs: number
+}
+
 // 余额响应
 export interface BalanceResponse {
   id: number

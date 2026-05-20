@@ -13,7 +13,7 @@ use super::{
     types::{
         AddCredentialRequest, ImportTokenJsonRequest, SetDisabledRequest, SetEndpointRequest,
         SetLoadBalancingModeRequest, SetPriorityRequest, SetRegionRequest, SuccessResponse,
-        UpdatePromptCacheConfigRequest,
+        TestModelRequest, UpdatePromptCacheConfigRequest,
     },
 };
 
@@ -121,6 +121,19 @@ pub async fn get_credential_models(
 ) -> impl IntoResponse {
     match state.service.list_models(id).await {
         Ok(models) => Json(serde_json::json!({ "models": models })).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/credentials/:id/test-model
+/// 阶段 7.17：用指定凭据真实发一条 "hi" 测试某模型是否可用
+pub async fn test_credential_model(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+    Json(payload): Json<TestModelRequest>,
+) -> impl IntoResponse {
+    match state.service.test_model(id, &payload.model_id).await {
+        Ok(result) => Json(result).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }

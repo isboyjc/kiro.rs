@@ -106,6 +106,13 @@ pub struct SetRegionRequest {
     pub api_region: Option<String>,
 }
 
+/// 阶段 7.17：测试模型可用性请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestModelRequest {
+    pub model_id: String,
+}
+
 /// 添加凭据请求
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -519,6 +519,18 @@ impl AdminService {
             .map_err(|e| self.classify_balance_error(e, id))
     }
 
+    /// 阶段 7.17：用指定凭据真实测试某模型是否可用（发一条 "hi"）
+    pub async fn test_model(
+        &self,
+        id: u64,
+        model_id: &str,
+    ) -> Result<crate::kiro::token_manager::TestModelResult, AdminServiceError> {
+        self.token_manager
+            .test_model_for(id, model_id)
+            .await
+            .map_err(|e| self.classify_balance_error(e, id))
+    }
+
     /// 从上游获取余额（无缓存）
     ///
     /// 阶段 7.12：

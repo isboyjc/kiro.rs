@@ -5,6 +5,7 @@ import type {
   BalanceResponse,
   CachedBalancesResponse,
   ModelsResponse,
+  TestModelResult,
   SuccessResponse,
   SetDisabledRequest,
   SetPriorityRequest,
@@ -111,6 +112,17 @@ export async function getCredentialBalance(id: number): Promise<BalanceResponse>
 // 阶段 7.16：获取凭据可用模型列表
 export async function getCredentialModels(id: number): Promise<ModelsResponse> {
   const { data } = await api.get<ModelsResponse>(`/credentials/${id}/models`)
+  return data
+}
+
+// 阶段 7.17：用指定凭据真实测试某模型是否可用（发一条 "hi"）
+export async function testCredentialModel(
+  id: number,
+  modelId: string
+): Promise<TestModelResult> {
+  const { data } = await api.post<TestModelResult>(`/credentials/${id}/test-model`, {
+    modelId,
+  })
   return data
 }
 

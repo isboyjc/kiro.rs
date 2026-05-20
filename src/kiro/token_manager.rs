@@ -503,6 +503,145 @@ pub(crate) async fn list_available_models(
     Ok(data.models)
 }
 
+/// 阶段 7.17：模型连通性测试结果
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestModelResult {
+    /// 助手回复文本（已截断）
+    pub reply: String,
+    /// 端到端耗时（毫秒）
+    pub duration_ms: u32,
+}
+
+/// 按字符边界安全截断字符串
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+/// 阶段 7.17：用指定凭据真实发一条 "hi" 测试某模型是否可用。
+///
+/// 直连该凭据的 generateAssistantResponse 端点，**不经过号池选号/冷却/限流**，
+/// 也不更新任何号池统计，因此不会影响号池运转。
+pub(crate) async fn send_test_message(
+    credentials: &KiroCredentials,
+    config: &Config,
+    token: &str,
+    proxy: Option<&ProxyConfig>,
+    model_id: &str,
+) -> anyhow::Result<TestModelResult> {
+    use crate::kiro::model::events::Event;
+    use crate::kiro::model::requests::conversation::{
+        ConversationState, CurrentMessage, UserInputMessage,
+    };
+    use crate::kiro::model::requests::kiro::KiroRequest;
+    use crate::kiro::parser::decoder::EventStreamDecoder;
+
+    let region = credentials.effective_api_region(config);
+    let host = format!("q.{}.amazonaws.com", region);
+    let machine_id = machine_id::generate_from_credentials(credentials, config);
+    let url = format!("https://{}/generateAssistantResponse", host);
+
+    // 构建最小对话体：单条 "hi"
+    let user_msg = UserInputMessage::new("hi", model_id);
+    let conversation = ConversationState::new(uuid::Uuid::new_v4().to_string())
+        .with_agent_continuation_id(uuid::Uuid::new_v4().to_string())
+        .with_agent_task_type("vibe")
+        .with_chat_trigger_type("MANUAL")
+        .with_current_message(CurrentMessage::new(user_msg));
+
+    // profileArn 注入：与 IDE endpoint 一致 —— SSO OIDC 凭据不带 profileArn
+    let is_sso_oidc = matches!(
+        credentials.auth_method.as_deref(),
+        Some("builder-id") | Some("idc")
+    ) || (credentials.client_id.is_some() && credentials.client_secret.is_some());
+    let profile_arn = if is_sso_oidc {
+        None
+    } else {
+        credentials.profile_arn.clone()
+    };
+
+    let kiro_request = KiroRequest {
+        conversation_state: conversation,
+        profile_arn,
+    };
+    let body = serde_json::to_string(&kiro_request)?;
+
+    let user_agent = format!(
+        "aws-sdk-js/1.0.0 ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererruntime#1.0.0 m/N,E KiroIDE-{}-{}",
+        config.system_version, config.node_version, config.kiro_version, machine_id
+    );
+    let amz_user_agent = format!("aws-sdk-js/1.0.0 KiroIDE-{}-{}", config.kiro_version, machine_id);
+
+    let client = build_client(proxy, 60, config.tls_backend)?;
+    let mut request = client
+        .post(&url)
+        .header("content-type", "application/json")
+        .header("x-amzn-codewhisperer-optout", "true")
+        .header("x-amzn-kiro-agent-mode", "vibe")
+        .header("x-amz-user-agent", &amz_user_agent)
+        .header("user-agent", &user_agent)
+        .header("host", &host)
+        .header("amz-sdk-invocation-id", uuid::Uuid::new_v4().to_string())
+        .header("amz-sdk-request", "attempt=1; max=1")
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Connection", "close")
+        .body(body);
+    if credentials.is_api_key_credential() {
+        request = request.header("tokentype", "API_KEY");
+    }
+
+    let started = Instant::now();
+    let response = request.send().await?;
+    let status = response.status();
+    if !status.is_success() {
+        let body_text = response.text().await.unwrap_or_default();
+        bail!("模型测试失败: {} {}", status, truncate_chars(&body_text, 300));
+    }
+
+    let body_bytes = response.bytes().await?;
+    let mut decoder = EventStreamDecoder::new();
+    let _ = decoder.feed(&body_bytes);
+
+    let mut reply = String::new();
+    for result in decoder.decode_iter() {
+        let Ok(frame) = result else { continue };
+        let Ok(event) = Event::from_frame(frame) else {
+            continue;
+        };
+        match event {
+            Event::AssistantResponse(resp) => reply.push_str(&resp.content),
+            Event::Exception {
+                exception_type,
+                message,
+            } => {
+                bail!("模型返回异常: {} {}", exception_type, message);
+            }
+            Event::Error {
+                error_code,
+                error_message,
+            } => {
+                bail!("模型返回错误: {} {}", error_code, error_message);
+            }
+            _ => {}
+        }
+    }
+
+    let duration_ms = started.elapsed().as_millis() as u32;
+    let reply = reply.trim();
+    if reply.is_empty() {
+        bail!("模型未返回任何文本（HTTP {}）", status);
+    }
+    Ok(TestModelResult {
+        reply: truncate_chars(reply, 500),
+        duration_ms,
+    })
+}
+
 // ============================================================================
 // 多凭据 Token 管理器
 // ============================================================================
@@ -2009,6 +2148,25 @@ impl MultiTokenManager {
         let (credentials, token) = self.resolve_token_for(id).await?;
         let effective_proxy = credentials.effective_proxy(self.proxy.as_ref());
         list_available_models(&credentials, &self.config, &token, effective_proxy.as_ref()).await
+    }
+
+    /// 阶段 7.17：用指定凭据真实发一条 "hi" 测试某模型是否可用。
+    /// 直连凭据端点，不经过号池选号/冷却/限流，不影响号池运转。
+    pub async fn test_model_for(
+        &self,
+        id: u64,
+        model_id: &str,
+    ) -> anyhow::Result<TestModelResult> {
+        let (credentials, token) = self.resolve_token_for(id).await?;
+        let effective_proxy = credentials.effective_proxy(self.proxy.as_ref());
+        send_test_message(
+            &credentials,
+            &self.config,
+            &token,
+            effective_proxy.as_ref(),
+            model_id,
+        )
+        .await
     }
 
     pub async fn get_usage_limits_for(&self, id: u64) -> anyhow::Result<UsageLimitsResponse> {
