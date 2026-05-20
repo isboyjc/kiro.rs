@@ -40,6 +40,21 @@ const SUSPEND_KEYWORDS: &[&str] = &[
     "account disabled",
 ];
 
+/// 真·封号/停用关键词（Phase A）。
+///
+/// 注意：`SUSPEND_KEYWORDS` 含 "rate limit"/"too many requests"，几乎所有 429 body 都命中——
+/// 不能用它判断 429 是否封号（否则正常 429 会被当成封号长冻）。本列表只保留**确属账号停用**
+/// 的词，用于区分"普通 429 限流（短退避）"与"账号被停用（长冷却）"。
+const ACCOUNT_SUSPENDED_KEYWORDS: &[&str] = &["suspended", "banned", "account disabled"];
+
+/// 判断错误 body 是否表明账号被真正停用（而非普通 429 限流）。
+pub fn is_account_suspended_message(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    ACCOUNT_SUSPENDED_KEYWORDS
+        .iter()
+        .any(|kw| lower.contains(kw))
+}
+
 /// 速率限制配置
 #[derive(Debug, Clone)]
 pub struct RateLimitConfig {

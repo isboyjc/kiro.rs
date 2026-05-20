@@ -6,7 +6,14 @@
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+/// 429 短退避默认参数（Phase A：把 429 从"长冻号"改成"毫秒级短退避"，防雪崩）
+const DEFAULT_RL_BACKOFF_BASE_MS: u64 = 500;
+const DEFAULT_RL_BACKOFF_MAX_MS: u64 = 3000;
+/// 倍数千分比（1500 = 1.5×），整数存储便于 Admin UI 编辑
+const DEFAULT_RL_BACKOFF_MULTIPLIER_MILLI: u64 = 1500;
 
 /// 冷却原因
 ///
@@ -120,6 +127,13 @@ pub struct CooldownManager {
 
     /// 长冷却时长（秒）
     long_cooldown_secs: u64,
+
+    /// 429（RateLimitExceeded）短退避基数（毫秒，可热更新）
+    rate_limit_base_ms: AtomicU64,
+    /// 429 短退避上限（毫秒，可热更新）
+    rate_limit_max_ms: AtomicU64,
+    /// 429 短退避倍数 ×1000（避免存 f64，可热更新；1500 = 1.5×）
+    rate_limit_mult_milli: AtomicU64,
 }
 
 impl Default for CooldownManager {
@@ -135,6 +149,9 @@ impl CooldownManager {
             entries: Mutex::new(HashMap::new()),
             max_short_cooldown_secs: 300, // 5 分钟
             long_cooldown_secs: 86400,    // 24 小时
+            rate_limit_base_ms: AtomicU64::new(DEFAULT_RL_BACKOFF_BASE_MS),
+            rate_limit_max_ms: AtomicU64::new(DEFAULT_RL_BACKOFF_MAX_MS),
+            rate_limit_mult_milli: AtomicU64::new(DEFAULT_RL_BACKOFF_MULTIPLIER_MILLI),
         }
     }
 
@@ -145,7 +162,21 @@ impl CooldownManager {
             entries: Mutex::new(HashMap::new()),
             max_short_cooldown_secs,
             long_cooldown_secs,
+            rate_limit_base_ms: AtomicU64::new(DEFAULT_RL_BACKOFF_BASE_MS),
+            rate_limit_max_ms: AtomicU64::new(DEFAULT_RL_BACKOFF_MAX_MS),
+            rate_limit_mult_milli: AtomicU64::new(DEFAULT_RL_BACKOFF_MULTIPLIER_MILLI),
         }
+    }
+
+    /// 热更新 429 短退避参数（Phase A：Admin UI 可改）。
+    /// `multiplier_milli` 为倍数的千分比（1500 = 1.5×），与内部存储一致。
+    pub fn set_rate_limit_backoff(&self, base_ms: u64, max_ms: u64, multiplier_milli: u64) {
+        self.rate_limit_base_ms
+            .store(base_ms.max(1), Ordering::Relaxed);
+        self.rate_limit_max_ms
+            .store(max_ms.max(base_ms.max(1)), Ordering::Relaxed);
+        self.rate_limit_mult_milli
+            .store(multiplier_milli.max(1000), Ordering::Relaxed);
     }
 
     /// 设置凭据冷却
@@ -266,6 +297,17 @@ impl CooldownManager {
 
     /// 计算冷却时长
     fn calculate_cooldown_duration(&self, reason: CooldownReason, trigger_count: u32) -> Duration {
+        // Phase A：429 走毫秒级短退避（base×mult^(n-1)，封顶 max），不再用 60s 长冻号。
+        // 这样偶发 429 只把号短暂跳过 0.5~3s，快速回池，避免"冻结→池缩水→雪崩"。
+        if reason == CooldownReason::RateLimitExceeded {
+            let base_ms = self.rate_limit_base_ms.load(Ordering::Relaxed) as f64;
+            let max_ms = self.rate_limit_max_ms.load(Ordering::Relaxed);
+            let mult = self.rate_limit_mult_milli.load(Ordering::Relaxed) as f64 / 1000.0;
+            let exp = trigger_count.saturating_sub(1) as i32;
+            let dur_ms = (base_ms * mult.powi(exp)) as u64;
+            return Duration::from_millis(dur_ms.clamp(1, max_ms));
+        }
+
         let base = reason.default_duration();
 
         if reason.is_auto_recoverable() {
@@ -314,14 +356,36 @@ mod tests {
     fn test_cooldown_set_and_check() {
         let manager = CooldownManager::new();
 
+        // Phase A：RateLimitExceeded 现为毫秒级短退避（默认 base 500ms），首次 = 500ms
         let duration = manager.set_cooldown(1, CooldownReason::RateLimitExceeded);
-        assert!(duration.as_secs() >= 60);
+        assert_eq!(duration.as_millis(), 500);
 
         let (reason, remaining) = manager.check_cooldown(1).unwrap();
         assert_eq!(reason, CooldownReason::RateLimitExceeded);
-        assert!(remaining.as_secs() > 0);
+        assert!(remaining.as_millis() > 0);
 
         assert!(!manager.is_available(1));
+    }
+
+    #[test]
+    fn test_rate_limit_short_backoff_escalates_and_caps() {
+        let manager = CooldownManager::new();
+        // 连续命中（trigger_count 递增，不清除）：500→750→1125→1687→2531→3000(封顶)
+        let expected = [500u128, 750, 1125, 1687, 2531, 3000, 3000];
+        for exp in expected {
+            let d = manager.set_cooldown(1, CooldownReason::RateLimitExceeded);
+            assert_eq!(d.as_millis(), exp, "短退避升级/封顶不符");
+        }
+    }
+
+    #[test]
+    fn test_rate_limit_backoff_hot_update() {
+        let manager = CooldownManager::new();
+        manager.set_rate_limit_backoff(1000, 5000, 2000); // 2.0×
+        let d1 = manager.set_cooldown(1, CooldownReason::RateLimitExceeded); // trigger 1
+        assert_eq!(d1.as_millis(), 1000);
+        let d2 = manager.set_cooldown(1, CooldownReason::RateLimitExceeded); // trigger 2 → ×2.0
+        assert_eq!(d2.as_millis(), 2000);
     }
 
     #[test]

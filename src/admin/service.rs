@@ -1006,6 +1006,16 @@ impl AdminService {
                 new_config.daily_max_requests,
             );
         }
+        if new_config.rl429_backoff_base_ms != old_config.rl429_backoff_base_ms
+            || new_config.rl429_backoff_max_ms != old_config.rl429_backoff_max_ms
+            || new_config.rl429_backoff_multiplier_milli != old_config.rl429_backoff_multiplier_milli
+        {
+            self.token_manager.update_cooldown_429_config(
+                new_config.rl429_backoff_base_ms,
+                new_config.rl429_backoff_max_ms,
+                new_config.rl429_backoff_multiplier_milli,
+            );
+        }
         if new_config.log_buffer_capacity != old_config.log_buffer_capacity {
             let cap = new_config
                 .log_buffer_capacity
@@ -1119,6 +1129,9 @@ fn diff_config_fields(old: &Config, new: &Config) -> (Vec<String>, Vec<String>) 
     diff!(extract_thinking, "extractThinking", hot);
     diff!(credential_rpm, "credentialRpm", hot);
     diff!(daily_max_requests, "dailyMaxRequests", hot);
+    diff!(rl429_backoff_base_ms, "rl429BackoffBaseMs", hot);
+    diff!(rl429_backoff_max_ms, "rl429BackoffMaxMs", hot);
+    diff!(rl429_backoff_multiplier_milli, "rl429BackoffMultiplierMilli", hot);
     diff!(log_buffer_capacity, "logBufferCapacity", hot);
     // 鉴权类：通过 RwLock 热轮换
     diff!(api_key, "apiKey", hot);
@@ -1379,6 +1392,42 @@ fn build_config_schema() -> ConfigSchemaResponse {
                         "number",
                         false,
                         "24h 滚动窗口内单凭据最多成功请求次数。模拟人类使用强度，避免被风控。留空/0 用默认 500；大号池或高频使用可调高（如 1000-2000）",
+                    )
+                },
+                ConfigSchemaField {
+                    min: Some(50.0),
+                    max: Some(60_000.0),
+                    default_value: Some(json!(500)),
+                    ..field(
+                        "rl429BackoffBaseMs",
+                        "429 短退避基数(ms)",
+                        "number",
+                        false,
+                        "撞上游 429 时该凭据的短退避起始时长（毫秒），按连续命中次数指数升级并封顶。越小越快回池、分摊越激进；默认 500ms（替代旧的 60s 长冻号，防雪崩）",
+                    )
+                },
+                ConfigSchemaField {
+                    min: Some(100.0),
+                    max: Some(120_000.0),
+                    default_value: Some(json!(3000)),
+                    ..field(
+                        "rl429BackoffMaxMs",
+                        "429 短退避上限(ms)",
+                        "number",
+                        false,
+                        "429 短退避的最大时长（毫秒），连续命中升级到此封顶。默认 3000ms",
+                    )
+                },
+                ConfigSchemaField {
+                    min: Some(1000.0),
+                    max: Some(5000.0),
+                    default_value: Some(json!(1500)),
+                    ..field(
+                        "rl429BackoffMultiplierMilli",
+                        "429 短退避倍数(‰)",
+                        "number",
+                        false,
+                        "连续命中 429 时退避时长的递增倍数，千分比整数（1500 = 1.5×）。base×(值/1000)^(n-1) 封顶上限。用整数便于编辑；默认 1500",
                     )
                 },
                 ConfigSchemaField {

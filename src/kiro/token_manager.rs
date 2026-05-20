@@ -956,6 +956,12 @@ impl MultiTokenManager {
             .unwrap_or(0);
 
         let load_balancing_mode = config.load_balancing_mode.clone();
+        // Phase A：429 短退避参数（config 即将被 move，先取出）
+        let rl429 = (
+            config.rl429_backoff_base_ms,
+            config.rl429_backoff_max_ms,
+            config.rl429_backoff_multiplier_milli,
+        );
         let manager = Self {
             config,
             proxy,
@@ -973,6 +979,9 @@ impl MultiTokenManager {
             cooldown_manager: CooldownManager::new(),
             background_refresher: None,
         };
+        manager
+            .cooldown_manager
+            .set_rate_limit_backoff(rl429.0, rl429.1, rl429.2);
 
         // 如果有新分配的 ID 或新生成的 machineId，立即持久化到配置文件
         if has_new_ids || has_new_machine_ids {
@@ -1712,8 +1721,22 @@ impl MultiTokenManager {
     /// 不增加 entry.failure_count（不影响 max-failures 禁用阈值），仅让
     /// rate_limiter 累积指数退避；若 body 命中 suspend/banned/quota exceeded 等关键词，
     /// 会触发更长的"自愈式退避"。
+    #[allow(dead_code)] // Phase A：429 路径已改走短退避，不再调用；保留供其他失败场景复用
     pub fn report_rate_limiter_failure(&self, id: u64, error_message: Option<&str>) {
         self.rate_limiter.record_failure(id, error_message);
+    }
+
+    /// 热更新 429 短退避参数（Phase A：Admin UI 可改 / 恢复默认）。
+    /// `multiplier_milli` 为倍数千分比（1500 = 1.5×）。
+    pub fn update_cooldown_429_config(&self, base_ms: u64, max_ms: u64, multiplier_milli: u64) {
+        self.cooldown_manager
+            .set_rate_limit_backoff(base_ms, max_ms, multiplier_milli);
+        tracing::info!(
+            base_ms,
+            max_ms,
+            multiplier_milli,
+            "429 短退避参数已热更新"
+        );
     }
 
     /// 报告指定凭据额度已用尽

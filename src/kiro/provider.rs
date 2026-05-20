@@ -384,18 +384,31 @@ impl KiroProvider {
                 continue;
             }
 
-            // 瞬态错误
-            if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
-                // 阶段 4.6：429 时把凭据加入 cooldown（feature 模式：不禁用，
-                // 但 acquire_context 下次会跳过它直到 cooldown 过期）。
-                // 408/5xx 不进 cooldown（瞬态网络/服务器问题，凭据本身无错）。
-                if status.as_u16() == 429 {
+            // 429 - 上游限流：Phase A 短退避，不长冻号。普通 429 走毫秒级短冷却
+            // （下次 acquire 会短暂跳过该号，0.5~3s 自愈回池），封号才长冷却。
+            if status.as_u16() == 429 {
+                if crate::kiro::rate_limiter::is_account_suspended_message(&body) {
+                    self.token_manager
+                        .set_credential_cooldown(ctx.id, CooldownReason::AccountSuspended);
+                } else {
                     self.token_manager
                         .set_credential_cooldown(ctx.id, CooldownReason::RateLimitExceeded);
-                    // 阶段 7.6：让 rate_limiter 累积指数退避 + 检测 suspend 关键词
-                    self.token_manager
-                        .report_rate_limiter_failure(ctx.id, Some(&body));
                 }
+                tracing::warn!(
+                    "MCP 请求 429，短退避跳过该号（尝试 {}/{}）: {}",
+                    attempt + 1,
+                    max_retries,
+                    body
+                );
+                last_error = Some(anyhow::anyhow!("MCP 请求失败: {} {}", status, body));
+                if attempt + 1 < max_retries {
+                    sleep(Self::retry_delay(attempt)).await;
+                }
+                continue;
+            }
+
+            // 408/5xx - 瞬态错误：重试但不冻不切凭据
+            if matches!(status.as_u16(), 408) || status.is_server_error() {
                 tracing::warn!(
                     "MCP 请求失败（上游瞬态错误，尝试 {}/{}）: {} {}",
                     attempt + 1,
@@ -667,19 +680,47 @@ impl KiroProvider {
                 continue;
             }
 
-            // 429/408/5xx - 瞬态上游错误：重试但不禁用或切换凭据
-            // （避免 429 high traffic / 502 high load 等瞬态错误把所有凭据锁死）
-            if matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
-                // 阶段 4.6：429 时把凭据加入 cooldown（feature 模式：不禁用，
-                // 但 acquire_context 下次会跳过它直到 cooldown 过期）。
-                // 408/5xx 不进 cooldown（瞬态网络/服务器问题，凭据本身无错）。
-                if status.as_u16() == 429 {
+            // 429 - 上游限流：Phase A 改为「短退避，不长冻号」防雪崩。
+            // 仅当 body 命中真·封号关键词时才长冷却剔除；普通 429 走毫秒级短退避
+            // （cooldown_manager 的 RateLimitExceeded 现为 500ms→3s 可配），
+            // 并把该号加入本轮 failed_ids 立刻 failover 到其他号。
+            if status.as_u16() == 429 {
+                if crate::kiro::rate_limiter::is_account_suspended_message(&body) {
                     self.token_manager
+                        .set_credential_cooldown(ctx.id, CooldownReason::AccountSuspended);
+                    tracing::warn!(
+                        credential_id = ctx.id,
+                        "API 请求 429 命中封号关键词，长冷却剔除（尝试 {}/{}）: {}",
+                        attempt + 1,
+                        max_retries,
+                        body
+                    );
+                } else {
+                    let cd = self
+                        .token_manager
                         .set_credential_cooldown(ctx.id, CooldownReason::RateLimitExceeded);
-                    // 阶段 7.6：让 rate_limiter 累积指数退避 + 检测 suspend 关键词
-                    self.token_manager
-                        .report_rate_limiter_failure(ctx.id, Some(&body));
+                    tracing::warn!(
+                        credential_id = ctx.id,
+                        cooldown_ms = cd.as_millis() as u64,
+                        "API 请求 429 短退避，本轮跳过该号（尝试 {}/{}）: {}",
+                        attempt + 1,
+                        max_retries,
+                        body
+                    );
                 }
+                last_error = Some(anyhow::anyhow!(
+                    "{} API 请求失败: {} {}",
+                    api_type,
+                    status,
+                    body
+                ));
+                failed_ids.push(ctx.id);
+                continue;
+            }
+
+            // 408/5xx - 瞬态上游错误：重试但不冻不切凭据
+            // （避免 502 high load 等瞬态错误把所有凭据锁死）
+            if matches!(status.as_u16(), 408) || status.is_server_error() {
                 tracing::warn!(
                     "API 请求失败（上游瞬态错误，尝试 {}/{}）: {} {}",
                     attempt + 1,

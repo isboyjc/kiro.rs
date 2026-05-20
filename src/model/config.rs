@@ -115,6 +115,24 @@ pub struct Config {
     #[serde(default)]
     pub daily_max_requests: Option<u32>,
 
+    /// 429 短退避基数（毫秒）—— Phase A
+    ///
+    /// 撞上游 429 时给该凭据的短退避起始时长（按连续命中次数指数升级，封顶 max）。
+    /// 替代旧的"60s 长冻号 + 30~300s 指数退避"，避免偶发 429 把号冻出池导致雪崩。
+    #[serde(default = "default_rl429_backoff_base_ms")]
+    pub rl429_backoff_base_ms: u64,
+
+    /// 429 短退避上限（毫秒）—— Phase A
+    #[serde(default = "default_rl429_backoff_max_ms")]
+    pub rl429_backoff_max_ms: u64,
+
+    /// 429 短退避倍数（千分比）—— Phase A
+    ///
+    /// 每连续命中一次 ×(此值/1000)，封顶 max。用整数千分比而非浮点，方便 Admin UI
+    /// 数字输入框编辑（HTML number 默认 step=1，浮点会被判非法）。1500 = 1.5×。
+    #[serde(default = "default_rl429_backoff_multiplier_milli")]
+    pub rl429_backoff_multiplier_milli: u64,
+
     /// 内存日志环形缓冲容量 —— 阶段 7.9 引入
     ///
     /// admin /api/admin/logs 面板的数据源。容量越大，可回溯的历史越长。
@@ -203,6 +221,18 @@ fn default_load_balancing_mode() -> String {
     "priority".to_string()
 }
 
+fn default_rl429_backoff_base_ms() -> u64 {
+    500
+}
+
+fn default_rl429_backoff_max_ms() -> u64 {
+    3000
+}
+
+fn default_rl429_backoff_multiplier_milli() -> u64 {
+    1500
+}
+
 fn default_extract_thinking() -> bool {
     true
 }
@@ -235,6 +265,9 @@ impl Default for Config {
             load_balancing_mode: default_load_balancing_mode(),
             credential_rpm: None,
             daily_max_requests: None,
+            rl429_backoff_base_ms: default_rl429_backoff_base_ms(),
+            rl429_backoff_max_ms: default_rl429_backoff_max_ms(),
+            rl429_backoff_multiplier_milli: default_rl429_backoff_multiplier_milli(),
             log_buffer_capacity: None,
             extract_thinking: default_extract_thinking(),
             default_endpoint: default_endpoint(),
