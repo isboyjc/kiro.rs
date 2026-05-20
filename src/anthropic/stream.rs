@@ -542,6 +542,8 @@ pub struct StreamContext {
     /// 是否需要剥离 thinking 内容开头的换行符
     /// 模型输出 `<thinking>\n` 时，`\n` 可能与标签在同一 chunk 或下一 chunk
     strip_thinking_leading_newline: bool,
+    /// 阶段 7.14：prompt cache 记账结果（None = accounting 关闭）
+    pub cache_usage: Option<super::cache_tracker::CacheResult>,
 }
 
 impl StreamContext {
@@ -568,11 +570,34 @@ impl StreamContext {
             thinking_block_index: None,
             text_block_index: None,
             strip_thinking_leading_newline: false,
+            cache_usage: None,
         }
+    }
+
+    /// 阶段 7.14：链式注入 prompt cache 记账结果
+    pub fn with_cache_usage(
+        mut self,
+        cache_usage: Option<super::cache_tracker::CacheResult>,
+    ) -> Self {
+        self.cache_usage = cache_usage;
+        self
     }
 
     /// 生成 message_start 事件
     pub fn create_message_start_event(&self) -> serde_json::Value {
+        let mut usage = json!({
+            "input_tokens": self.input_tokens,
+            "output_tokens": 1
+        });
+        // 阶段 7.14：注入 prompt cache 字段（accounting 开启时）
+        if let Some(c) = &self.cache_usage {
+            usage["cache_creation_input_tokens"] = json!(c.cache_creation_input_tokens);
+            usage["cache_read_input_tokens"] = json!(c.cache_read_input_tokens);
+            usage["cache_creation"] = json!({
+                "ephemeral_5m_input_tokens": c.cache_creation_5m_input_tokens,
+                "ephemeral_1h_input_tokens": c.cache_creation_1h_input_tokens,
+            });
+        }
         json!({
             "type": "message_start",
             "message": {
@@ -583,10 +608,7 @@ impl StreamContext {
                 "model": self.model,
                 "stop_reason": null,
                 "stop_sequence": null,
-                "usage": {
-                    "input_tokens": self.input_tokens,
-                    "output_tokens": 1
-                }
+                "usage": usage
             }
         })
     }
@@ -1166,6 +1188,15 @@ impl BufferedStreamContext {
             estimated_input_tokens,
             initial_events_generated: false,
         }
+    }
+
+    /// 阶段 7.14：链式注入 prompt cache 记账结果（委托给 inner）
+    pub fn with_cache_usage(
+        mut self,
+        cache_usage: Option<super::cache_tracker::CacheResult>,
+    ) -> Self {
+        self.inner.cache_usage = cache_usage;
+        self
     }
 
     /// 处理 Kiro 事件并缓冲结果

@@ -21,11 +21,39 @@ use std::time::Duration;
 use tokio::time::interval;
 use uuid::Uuid;
 
+use super::cache_tracker::{CacheProfile, CacheResult, CacheTracker};
 use super::converter::{ConversionError, convert_request};
 use super::middleware::AppState;
 use super::stream::{BufferedStreamContext, SseEvent, StreamContext};
 use super::types::{CountTokensRequest, CountTokensResponse, ErrorResponse, MessagesRequest, Model, ModelsResponse, OutputConfig, Thinking};
 use super::websearch;
+
+/// 阶段 7.14：把 CacheResult 注入到 usage JSON 对象
+fn inject_cache_usage(usage: &mut serde_json::Value, c: &CacheResult) {
+    usage["cache_creation_input_tokens"] = json!(c.cache_creation_input_tokens);
+    usage["cache_read_input_tokens"] = json!(c.cache_read_input_tokens);
+    usage["cache_creation"] = json!({
+        "ephemeral_5m_input_tokens": c.cache_creation_5m_input_tokens,
+        "ephemeral_1h_input_tokens": c.cache_creation_1h_input_tokens,
+    });
+}
+
+/// 阶段 7.14：拿到实际凭据后 compute + update 缓存状态，返回 CacheResult。
+/// tracker / profile 任一为 None 时返回 None（accounting 关闭）。
+fn resolve_and_record_cache(
+    cache_tracker: &Option<std::sync::Arc<CacheTracker>>,
+    cache_profile: &Option<CacheProfile>,
+    credential_id: u64,
+) -> Option<CacheResult> {
+    match (cache_tracker, cache_profile) {
+        (Some(tracker), Some(profile)) => {
+            let result = tracker.compute(credential_id, profile);
+            tracker.update(credential_id, profile);
+            Some(result)
+        }
+        _ => None,
+    }
+}
 
 /// 将 KiroProvider 错误映射为 HTTP 响应
 fn map_provider_error(err: Error) -> Response {
@@ -291,13 +319,25 @@ pub async fn post_messages(
         "Kiro request body（仅大小；启用 sensitive-logs 后输出完整内容）"
     );
 
-    // 估算输入 tokens
+    // 估算输入 tokens（用 clone 保留 payload，供下面构建 cache profile）
     let input_tokens = token::count_all_tokens(
         payload.model.clone(),
-        payload.system,
-        payload.messages,
-        payload.tools,
+        payload.system.clone(),
+        payload.messages.clone(),
+        payload.tools.clone(),
     ) as i32;
+
+    // 阶段 7.14：构建 prompt cache profile（仅当 accounting 开启）
+    let (cache_tracker, cache_profile) = {
+        let runtime = state.prompt_cache_runtime.read();
+        if runtime.accounting_enabled() {
+            let snapshot = runtime.snapshot();
+            let profile = snapshot.tracker.build_profile(&payload, input_tokens);
+            (Some(snapshot.tracker), Some(profile))
+        } else {
+            (None, None)
+        }
+    };
 
     // 检查是否启用了thinking
     let thinking_enabled = payload
@@ -317,16 +357,29 @@ pub async fn post_messages(
             input_tokens,
             thinking_enabled,
             tool_name_map,
+            cache_tracker,
+            cache_profile,
         )
         .await
     } else {
         // 非流式响应：仅在配置开启时提取 thinking 块
         let extract_thinking = state.extract_thinking_snapshot() && thinking_enabled;
-        handle_non_stream_request(provider, &request_body, &payload.model, input_tokens, extract_thinking, tool_name_map).await
+        handle_non_stream_request(
+            provider,
+            &request_body,
+            &payload.model,
+            input_tokens,
+            extract_thinking,
+            tool_name_map,
+            cache_tracker,
+            cache_profile,
+        )
+        .await
     }
 }
 
 /// 处理流式请求
+#[allow(clippy::too_many_arguments)]
 async fn handle_stream_request(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
     request_body: &str,
@@ -334,21 +387,27 @@ async fn handle_stream_request(
     input_tokens: i32,
     thinking_enabled: bool,
     tool_name_map: std::collections::HashMap<String, String>,
+    cache_tracker: Option<std::sync::Arc<CacheTracker>>,
+    cache_profile: Option<CacheProfile>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
-    let response = match provider.call_api_stream(request_body).await {
-        Ok(resp) => resp,
+    let api_result = match provider.call_api_stream(request_body).await {
+        Ok(r) => r,
         Err(e) => return map_provider_error(e),
     };
 
+    // 阶段 7.14：拿到实际凭据后计算并记录 cache 使用
+    let cache_usage = resolve_and_record_cache(&cache_tracker, &cache_profile, api_result.credential_id);
+
     // 创建流处理上下文
-    let mut ctx = StreamContext::new_with_thinking(model, input_tokens, thinking_enabled, tool_name_map);
+    let mut ctx = StreamContext::new_with_thinking(model, input_tokens, thinking_enabled, tool_name_map)
+        .with_cache_usage(cache_usage);
 
     // 生成初始事件
     let initial_events = ctx.generate_initial_events();
 
     // 创建 SSE 流
-    let stream = create_sse_stream(response, ctx, initial_events);
+    let stream = create_sse_stream(api_result.response, ctx, initial_events);
 
     // 返回 SSE 响应
     Response::builder()
@@ -463,6 +522,7 @@ fn create_sse_stream(
 use super::converter::get_context_window_size;
 
 /// 处理非流式请求
+#[allow(clippy::too_many_arguments)]
 async fn handle_non_stream_request(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
     request_body: &str,
@@ -470,12 +530,18 @@ async fn handle_non_stream_request(
     input_tokens: i32,
     thinking_enabled: bool,
     tool_name_map: std::collections::HashMap<String, String>,
+    cache_tracker: Option<std::sync::Arc<CacheTracker>>,
+    cache_profile: Option<CacheProfile>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
-    let response = match provider.call_api(request_body).await {
-        Ok(resp) => resp,
+    let api_result = match provider.call_api(request_body).await {
+        Ok(r) => r,
         Err(e) => return map_provider_error(e),
     };
+
+    // 阶段 7.14：拿到实际凭据后计算并记录 cache 使用
+    let cache_usage = resolve_and_record_cache(&cache_tracker, &cache_profile, api_result.credential_id);
+    let response = api_result.response;
 
     // 读取响应体
     let body_bytes = match response.bytes().await {
@@ -630,6 +696,14 @@ async fn handle_non_stream_request(
     let final_input_tokens = context_input_tokens.unwrap_or(input_tokens);
 
     // 构建 Anthropic 响应
+    let mut usage = json!({
+        "input_tokens": final_input_tokens,
+        "output_tokens": output_tokens
+    });
+    // 阶段 7.14：注入 prompt cache 字段
+    if let Some(c) = &cache_usage {
+        inject_cache_usage(&mut usage, c);
+    }
     let response_body = json!({
         "id": format!("msg_{}", Uuid::new_v4().to_string().replace('-', "")),
         "type": "message",
@@ -638,10 +712,7 @@ async fn handle_non_stream_request(
         "model": model,
         "stop_reason": stop_reason,
         "stop_sequence": null,
-        "usage": {
-            "input_tokens": final_input_tokens,
-            "output_tokens": output_tokens
-        }
+        "usage": usage
     });
 
     (StatusCode::OK, Json(response_body)).into_response()
@@ -813,13 +884,25 @@ pub async fn post_messages_cc(
         "Kiro request body（仅大小；启用 sensitive-logs 后输出完整内容）"
     );
 
-    // 估算输入 tokens
+    // 估算输入 tokens（clone 保留 payload 供 cache profile 用）
     let input_tokens = token::count_all_tokens(
         payload.model.clone(),
-        payload.system,
-        payload.messages,
-        payload.tools,
+        payload.system.clone(),
+        payload.messages.clone(),
+        payload.tools.clone(),
     ) as i32;
+
+    // 阶段 7.14：构建 prompt cache profile
+    let (cache_tracker, cache_profile) = {
+        let runtime = state.prompt_cache_runtime.read();
+        if runtime.accounting_enabled() {
+            let snapshot = runtime.snapshot();
+            let profile = snapshot.tracker.build_profile(&payload, input_tokens);
+            (Some(snapshot.tracker), Some(profile))
+        } else {
+            (None, None)
+        }
+    };
 
     // 检查是否启用了thinking
     let thinking_enabled = payload
@@ -839,12 +922,24 @@ pub async fn post_messages_cc(
             input_tokens,
             thinking_enabled,
             tool_name_map,
+            cache_tracker,
+            cache_profile,
         )
         .await
     } else {
         // 非流式响应：仅在配置开启时提取 thinking 块
         let extract_thinking = state.extract_thinking_snapshot() && thinking_enabled;
-        handle_non_stream_request(provider, &request_body, &payload.model, input_tokens, extract_thinking, tool_name_map).await
+        handle_non_stream_request(
+            provider,
+            &request_body,
+            &payload.model,
+            input_tokens,
+            extract_thinking,
+            tool_name_map,
+            cache_tracker,
+            cache_profile,
+        )
+        .await
     }
 }
 
@@ -852,6 +947,7 @@ pub async fn post_messages_cc(
 ///
 /// 与 `handle_stream_request` 不同，此函数会缓冲所有事件直到流结束，
 /// 然后用从 contextUsageEvent 计算的正确 input_tokens 生成 message_start 事件。
+#[allow(clippy::too_many_arguments)]
 async fn handle_stream_request_buffered(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
     request_body: &str,
@@ -859,18 +955,24 @@ async fn handle_stream_request_buffered(
     estimated_input_tokens: i32,
     thinking_enabled: bool,
     tool_name_map: std::collections::HashMap<String, String>,
+    cache_tracker: Option<std::sync::Arc<CacheTracker>>,
+    cache_profile: Option<CacheProfile>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
-    let response = match provider.call_api_stream(request_body).await {
-        Ok(resp) => resp,
+    let api_result = match provider.call_api_stream(request_body).await {
+        Ok(r) => r,
         Err(e) => return map_provider_error(e),
     };
 
+    // 阶段 7.14：拿到实际凭据后计算并记录 cache 使用
+    let cache_usage = resolve_and_record_cache(&cache_tracker, &cache_profile, api_result.credential_id);
+
     // 创建缓冲流处理上下文
-    let ctx = BufferedStreamContext::new(model, estimated_input_tokens, thinking_enabled, tool_name_map);
+    let ctx = BufferedStreamContext::new(model, estimated_input_tokens, thinking_enabled, tool_name_map)
+        .with_cache_usage(cache_usage);
 
     // 创建缓冲 SSE 流
-    let stream = create_buffered_sse_stream(response, ctx);
+    let stream = create_buffered_sse_stream(api_result.response, ctx);
 
     // 返回 SSE 响应
     Response::builder()
