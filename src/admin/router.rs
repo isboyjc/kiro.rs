@@ -9,7 +9,8 @@ use super::{
     handlers::{
         add_credential, clear_logs, delete_credential, force_refresh_token, get_all_credentials,
         get_cached_balances, get_compression_config, get_config, get_config_raw,
-        get_config_schema, get_credential_balance, get_load_balancing_mode, get_logs,
+        get_config_schema, get_credential_balance, get_credential_models,
+        get_load_balancing_mode, get_logs,
         get_prompt_cache_config, import_token_json, reset_failure_count,
         set_credential_disabled, set_credential_endpoint, set_credential_priority,
         set_credential_region, set_load_balancing_mode, update_compression_config,
@@ -55,6 +56,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/credentials/{id}/reset", post(reset_failure_count))
         .route("/credentials/{id}/refresh", post(force_refresh_token))
         .route("/credentials/{id}/balance", get(get_credential_balance))
+        .route("/credentials/{id}/models", get(get_credential_models))
         .route(
             "/config/load-balancing",
             get(get_load_balancing_mode).put(set_load_balancing_mode),

@@ -508,6 +508,17 @@ impl AdminService {
         Ok(balance)
     }
 
+    /// 阶段 7.16：列出指定凭据的可用模型
+    pub async fn list_models(
+        &self,
+        id: u64,
+    ) -> Result<Vec<crate::kiro::token_manager::ModelInfo>, AdminServiceError> {
+        self.token_manager
+            .list_models_for(id)
+            .await
+            .map_err(|e| self.classify_balance_error(e, id))
+    }
+
     /// 从上游获取余额（无缓存）
     ///
     /// 阶段 7.12：

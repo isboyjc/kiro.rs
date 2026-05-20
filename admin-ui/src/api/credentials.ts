@@ -4,6 +4,7 @@ import type {
   CredentialsStatusResponse,
   BalanceResponse,
   CachedBalancesResponse,
+  ModelsResponse,
   SuccessResponse,
   SetDisabledRequest,
   SetPriorityRequest,
@@ -104,6 +105,12 @@ export async function forceRefreshToken(
 // 获取凭据余额
 export async function getCredentialBalance(id: number): Promise<BalanceResponse> {
   const { data } = await api.get<BalanceResponse>(`/credentials/${id}/balance`)
+  return data
+}
+
+// 阶段 7.16：获取凭据可用模型列表
+export async function getCredentialModels(id: number): Promise<ModelsResponse> {
+  const { data } = await api.get<ModelsResponse>(`/credentials/${id}/models`)
   return data
 }
 

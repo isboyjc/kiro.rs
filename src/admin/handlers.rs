@@ -113,6 +113,18 @@ pub async fn get_credential_balance(
     }
 }
 
+/// GET /api/admin/credentials/:id/models
+/// 阶段 7.16：列出指定凭据的可用模型
+pub async fn get_credential_models(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+) -> impl IntoResponse {
+    match state.service.list_models(id).await {
+        Ok(models) => Json(serde_json::json!({ "models": models })).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
 /// GET /api/admin/credentials/balances/cached
 /// 读取所有凭据的缓存余额快照（不触发上游请求，前端用于汇总展示）
 pub async fn get_cached_balances(State(state): State<AdminState>) -> impl IntoResponse {

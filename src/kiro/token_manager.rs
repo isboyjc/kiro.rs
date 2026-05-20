@@ -421,6 +421,88 @@ pub(crate) async fn get_usage_limits(
     Ok(data)
 }
 
+/// 阶段 7.16：可用模型信息（Kiro ListAvailableModels 返回）
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelInfo {
+    #[serde(default)]
+    pub model_id: String,
+    #[serde(default)]
+    pub model_name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub supported_input_types: Vec<String>,
+    #[serde(default)]
+    pub rate_multiplier: Option<f64>,
+    #[serde(default)]
+    pub token_limits: Option<ModelTokenLimits>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelTokenLimits {
+    #[serde(default)]
+    pub max_input_tokens: Option<i64>,
+    #[serde(default)]
+    pub max_output_tokens: Option<i64>,
+}
+
+/// 阶段 7.16：调用 Kiro ListAvailableModels（参考 Kiro-Go kiro_api.go:82）
+pub(crate) async fn list_available_models(
+    credentials: &KiroCredentials,
+    config: &Config,
+    token: &str,
+    proxy: Option<&ProxyConfig>,
+) -> anyhow::Result<Vec<ModelInfo>> {
+    let region = credentials.effective_api_region(config);
+    let host = format!("q.{}.amazonaws.com", region);
+    let machine_id = machine_id::generate_from_credentials(credentials, config);
+
+    let mut url = format!(
+        "https://{}/ListAvailableModels?origin=AI_EDITOR&maxResults=50",
+        host
+    );
+    if let Some(profile_arn) = &credentials.profile_arn {
+        url.push_str(&format!("&profileArn={}", urlencoding::encode(profile_arn)));
+    }
+
+    let user_agent = format!(
+        "aws-sdk-js/1.0.0 ua/2.1 os/{} lang/js md/nodejs#{} api/codewhispererruntime#1.0.0 m/N,E KiroIDE-{}-{}",
+        config.system_version, config.node_version, config.kiro_version, machine_id
+    );
+    let amz_user_agent = format!("aws-sdk-js/1.0.0 KiroIDE-{}-{}", config.kiro_version, machine_id);
+
+    let client = build_client(proxy, 60, config.tls_backend)?;
+    let mut request = client
+        .get(&url)
+        .header("x-amz-user-agent", &amz_user_agent)
+        .header("user-agent", &user_agent)
+        .header("host", &host)
+        .header("amz-sdk-invocation-id", uuid::Uuid::new_v4().to_string())
+        .header("amz-sdk-request", "attempt=1; max=1")
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Connection", "close");
+    if credentials.is_api_key_credential() {
+        request = request.header("tokentype", "API_KEY");
+    }
+
+    let response = request.send().await?;
+    let status = response.status();
+    if !status.is_success() {
+        let body_text = response.text().await.unwrap_or_default();
+        bail!("获取可用模型失败: {} {}", status, body_text);
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ModelsResponse {
+        #[serde(default)]
+        models: Vec<ModelInfo>,
+    }
+    let data: ModelsResponse = response.json().await?;
+    Ok(data.models)
+}
+
 // ============================================================================
 // 多凭据 Token 管理器
 // ============================================================================
@@ -1847,7 +1929,9 @@ impl MultiTokenManager {
     }
 
     /// 获取指定凭据的使用额度（Admin API）
-    pub async fn get_usage_limits_for(&self, id: u64) -> anyhow::Result<UsageLimitsResponse> {
+    /// 阶段 7.16：获取指定凭据的有效 token（必要时刷新），返回 (最新凭据, token)。
+    /// 从 get_usage_limits_for 抽取，供 list_models_for 等只读 API 复用。
+    async fn resolve_token_for(&self, id: u64) -> anyhow::Result<(KiroCredentials, String)> {
         let credentials = {
             let entries = self.entries.lock();
             entries
@@ -1864,7 +1948,6 @@ impl MultiTokenManager {
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("API Key 凭据缺少 kiroApiKey"))?
         } else {
-            // 检查是否需要刷新 token
             let needs_refresh =
                 is_token_expired(&credentials) || is_token_expiring_soon(&credentials);
 
@@ -1890,7 +1973,6 @@ impl MultiTokenManager {
                             entry.credentials = new_creds.clone();
                         }
                     }
-                    // 持久化失败只记录警告，不影响本次请求
                     if let Err(e) = self.persist_credentials() {
                         tracing::warn!("Token 刷新后持久化失败（不影响本次请求）: {}", e);
                     }
@@ -1909,6 +1991,7 @@ impl MultiTokenManager {
             }
         };
 
+        // 重新取一次最新凭据（刷新后字段可能变）
         let credentials = {
             let entries = self.entries.lock();
             entries
@@ -1917,6 +2000,19 @@ impl MultiTokenManager {
                 .map(|e| e.credentials.clone())
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
         };
+
+        Ok((credentials, token))
+    }
+
+    /// 阶段 7.16：列出指定凭据的可用模型（Kiro ListAvailableModels API）
+    pub async fn list_models_for(&self, id: u64) -> anyhow::Result<Vec<ModelInfo>> {
+        let (credentials, token) = self.resolve_token_for(id).await?;
+        let effective_proxy = credentials.effective_proxy(self.proxy.as_ref());
+        list_available_models(&credentials, &self.config, &token, effective_proxy.as_ref()).await
+    }
+
+    pub async fn get_usage_limits_for(&self, id: u64) -> anyhow::Result<UsageLimitsResponse> {
+        let (credentials, token) = self.resolve_token_for(id).await?;
 
         let effective_proxy = credentials.effective_proxy(self.proxy.as_ref());
         let usage_limits = get_usage_limits(&credentials, &self.config, &token, effective_proxy.as_ref()).await?;

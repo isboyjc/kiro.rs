@@ -7,7 +7,7 @@ import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { CredentialCard } from '@/components/credential-card'
-import { BalanceDialog } from '@/components/balance-dialog'
+import { CredentialDetailDialog } from '@/components/credential-detail-dialog'
 import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { ImportTokenJsonDialog } from '@/components/import-token-json-dialog'
 import { SettingsDialog } from '@/components/settings-dialog'
@@ -888,9 +888,9 @@ export function Dashboard({ onLogout }: DashboardProps) {
         </Card>
       </main>
 
-      {/* 余额对话框 */}
-      <BalanceDialog
-        credentialId={selectedCredentialId}
+      {/* 凭据详情对话框 */}
+      <CredentialDetailDialog
+        credential={data?.credentials.find(c => c.id === selectedCredentialId) ?? null}
         open={balanceDialogOpen}
         onOpenChange={setBalanceDialogOpen}
       />

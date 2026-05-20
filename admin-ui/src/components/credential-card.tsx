@@ -4,7 +4,7 @@ import {
   RefreshCw,
   ChevronUp,
   ChevronDown,
-  Wallet,
+  Info,
   Trash2,
   Loader2,
   Pencil,
@@ -577,8 +577,8 @@ export function CredentialCard({
             />
             <div className="flex-1" />
             <IconButton
-              icon={<Wallet className="h-3.5 w-3.5" />}
-              tooltip="查看余额详情"
+              icon={<Info className="h-3.5 w-3.5" />}
+              tooltip="详情"
               variant="primary"
               onClick={() => onViewBalance(credential.id)}
             />

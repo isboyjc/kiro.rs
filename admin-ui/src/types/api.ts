@@ -188,6 +188,23 @@ export interface CachedBalancesResponse {
   balances: CachedBalanceInfo[]
 }
 
+// 阶段 7.16：可用模型信息
+export interface ModelInfo {
+  modelId: string
+  modelName: string
+  description?: string | null
+  supportedInputTypes?: string[]
+  rateMultiplier?: number | null
+  tokenLimits?: {
+    maxInputTokens?: number | null
+    maxOutputTokens?: number | null
+  } | null
+}
+
+export interface ModelsResponse {
+  models: ModelInfo[]
+}
+
 // 余额响应
 export interface BalanceResponse {
   id: number

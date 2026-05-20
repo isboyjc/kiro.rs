@@ -8,6 +8,7 @@ import {
   resetCredentialFailure,
   forceRefreshToken,
   getCredentialBalance,
+  getCredentialModels,
   getCachedBalances,
   addCredential,
   deleteCredential,
@@ -33,6 +34,17 @@ export function useCredentialBalance(id: number | null) {
     queryFn: () => getCredentialBalance(id!),
     enabled: id !== null,
     retry: false, // 余额查询失败时不重试（避免重复请求被封禁的账号）
+  })
+}
+
+// 阶段 7.16：查询凭据可用模型列表
+export function useCredentialModels(id: number | null) {
+  return useQuery({
+    queryKey: ['credential-models', id],
+    queryFn: () => getCredentialModels(id!),
+    enabled: id !== null,
+    retry: false,
+    staleTime: 5 * 60 * 1000, // 模型列表变化慢，缓存 5 分钟
   })
 }
 
